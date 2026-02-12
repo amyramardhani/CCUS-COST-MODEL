@@ -1,0 +1,1111 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>CCUS Cost Model — NETL Point-Source Carbon Capture</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: system-ui, -apple-system, sans-serif; background: #f8fafc; }
+  #root { min-height: 100vh; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+
+<script src="https://unpkg.com/react@18.2.0/umd/react.production.min.js"></script>
+<script src="https://unpkg.com/react-dom@18.2.0/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone@7.23.9/babel.min.js"></script>
+<script src="https://unpkg.com/recharts@2.5.0/umd/Recharts.js"></script>
+
+<script type="text/babel">
+/* ── Globals from CDN ── */
+const { useState, useMemo, useCallback, useEffect } = React;
+const {
+  BarChart, Bar, LineChart, Line, XAxis, YAxis,
+  Tooltip, Legend, ResponsiveContainer,
+  PieChart, Pie, Cell, ReferenceLine
+} = Recharts;
+
+/* ── Glossary (extracted to top level) ── */
+const G = {
+  TIC: "Total Installed Cost \u2014 the sum of all bare erected equipment costs plus engineering, CM, and contingencies. Does not include owner’s costs.",
+  TOC: "Total Overnight Cost \u2014 TIC plus owner’s costs (preproduction, inventory capital, financing costs, and other owner expenses). Represents the total capital required if built instantaneously.",
+  "CAPEX $/t": "Capital intensity \u2014 total capital cost divided by annual CO\u2082 captured. Shows how much upfront investment is needed per tonne of annual capacity. This is NOT an annualized cost. The annualized capital cost (Capital Charge in the COC table) applies the CCF (~5\u20138%) to spread this over the project\u2019s economic life.",
+  CAPEX: "Capital Expenditure \u2014 total upfront investment for the capture facility. In this model, CAPEX equals TOC (Total Overnight Cost).",
+  CCF: "Capital Charge Factor \u2014 annualized fraction of TOC that must be recovered each year to cover debt service, equity returns, taxes, and depreciation over the project’s economic life (typically 30 years).",
+  CEPCI: "Chemical Engineering Plant Cost Index \u2014 a widely used index to escalate historical equipment costs to current-year dollars. Published monthly by Chemical Engineering magazine.",
+  COC: "Cost of CO₂ Captured \u2014 the all-in levelized cost per tonne of CO₂ captured, including capital charge, fixed and variable O&M, purchased power, and fuel (if applicable).",
+  "Capital Charge": "Annual capital recovery cost per tonne CO₂ \u2014 calculated as (TOC × CCF) / annual CO₂ captured. Covers debt payments, equity returns, taxes, depreciation, and insurance on the capital investment.",
+  "Fixed O&M": "Fixed Operating & Maintenance costs \u2014 expenses that do not vary with plant output: operating labor, maintenance labor & materials, administrative support, and property taxes/insurance. Expressed in $/t CO₂.",
+  "Variable O&M": "Variable Operating & Maintenance costs \u2014 expenses that scale with throughput: chemicals and consumables (amine solvent make-up, caustic, desiccant), water treatment, and waste disposal. Expressed in $/t CO₂.",
+  "Power Cost": "Cost of purchased electricity to run the capture equipment \u2014 compressors, pumps, fans, and auxiliaries. Calculated as (MW demand × $/MWh × capacity factor × 8760 hrs) / annual CO₂ captured.",
+  "Natural Gas Fuel": "Fuel cost for natural gas consumed to generate steam for amine solvent regeneration in post-combustion capture. Scales linearly with gas price. High-purity sources (compression-only) have zero fuel cost.",
+  "Location Factor": "State-level construction cost multiplier relative to a Gulf Coast (Louisiana) baseline. Accounts for regional differences in labor rates, productivity, material transport, and regulatory costs.",
+  "Capacity Factor": "Fraction of the year the capture plant operates (0\u20131.0). At 85%, the plant runs ~7,446 hours/year. Affects annual CO₂ captured and power consumption. For NGCC power plants, equipment is always sized at 100% CF regardless of operating CF.",
+  "Six-Tenths Rule": "Empirical cost-scaling law: Cost₂ = Cost\u2081 × (Capacity₂/Capacity\u2081)^0.6. Reflects economies of scale \u2014 doubling capacity increases cost by only ~52%, not 100%.",
+  "Scale Adj": "Fixed O&M scale adjustment (exponent n=0.15) \u2014 when capacity changes, fixed costs per tonne decrease modestly due to staffing efficiencies and shared overheads.",
+  "Owner’s Costs": "Project costs beyond the installed equipment: pre-production/startup, inventory capital, land, financing fees, and other owner expenses. Typically 15\u201325% of TIC depending on sector.",
+  Retrofit: "Capture equipment added to an existing industrial facility. May include a Retrofit Difficulty Factor (RDF) that increases costs 5\u201315% to account for integration complexity.",
+  Greenfield: "A new-build facility where the capture system is designed into the plant from the start. Avoids retrofit difficulty premiums but may include boiler/steam costs.",
+  "NETL Ref": "Reference case values from NETL’s \u201cCost of Capturing CO₂ from Industrial Sources\u201d (2018 USD, Louisiana Gulf Coast base). All scenarios use post-combustion amine or compression-only technology.",
+  "EIA Rate": "U.S. Energy Information Administration (EIA) average industrial electricity price by state, from Table 5.6.a (2024 data). Converted from ¢/kWh to $/MWh.",
+  "Emission Source": "The industrial process or power plant whose flue gas CO₂ is being captured. CO₂ concentration varies widely: ~4% for NGCC, ~14\u201325% for cement/steel, up to 99%+ for ammonia/ethanol.",
+  "Cost Year": "The dollar-year for all cost outputs. CEPCI index is used to escalate from the 2018 NETL base year to the selected year.",
+  "Capture Config": "Capture rate (90% or 99%) and build type (Retrofit or Greenfield). Higher capture rates require larger equipment and more energy, increasing costs.",
+  "Project CO₂": "Annual tonnes of CO₂ captured at the specified capacity factor. This is the denominator in all $/t CO₂ calculations.",
+  "Power Demand": "Electrical power consumed by the capture system (MW). Includes CO₂ compressors, solvent circulation pumps, cooling water pumps, and fans. Scales linearly with CO₂ throughput.",
+  "Annual Power Cost": "Total electricity expenditure per year = MW × $/MWh × CF × 8,760 hours. A major operating cost driver, especially for large industrial/power plant capture.",
+  "Total OPEX": "Sum of all annual operating costs per tonne CO₂: Fixed O&M + Variable O&M + Power + Fuel. Does not include the capital charge.",
+  "Total O&M": "Combined Fixed + Variable O&M costs per tonne CO₂, excluding power and fuel. Represents the non-energy operating cost of running the capture plant.",
+  "Debt/Equity": "The financing structure assumed by NETL for each sector. Higher equity fractions increase the CCF because equity investors require higher returns than debt holders.",
+};
+
+/* ── Tip component (extracted to top level to avoid hooks-in-render issues) ── */
+const Tip = ({ k, children, style: s }) => {
+  const [show, setShow] = useState(false);
+  const def = G[k];
+  if (!def) return <span style={s}>{children}</span>;
+  return (
+    <span style={{ position: "relative", ...s }}
+      onMouseEnter={() => setShow(true)} onMouseLeave={() => setShow(false)}>
+      <span style={{ borderBottom: "1px dotted #94a3b8", cursor: "help" }}>{children}</span>
+      {show && (
+        <span style={{ position: "absolute", bottom: "calc(100% + 6px)", left: "50%", transform: "translateX(-50%)", width: 260, padding: "10px 12px", background: "#1e293b", border: "1px solid #334155", borderRadius: 0, fontSize: 11, lineHeight: 1.5, color: "#cbd5e1", zIndex: 9999, boxShadow: "0 4px 12px rgba(0,0,0,0.3)", pointerEvents: "none" }}>
+          <span style={{ display: "block", fontWeight: 700, color: "#f1f5f9", marginBottom: 3, fontSize: 11.5 }}>{k}</span>
+          {def}
+          <span style={{ position: "absolute", bottom: -5, left: "50%", transform: "translateX(-50%) rotate(45deg)", width: 8, height: 8, background: "#1e293b", borderRight: "1px solid #334155", borderBottom: "1px solid #334155" }} />
+        </span>
+      )}
+    </span>
+  );
+};
+
+/* ── Main App ── */
+
+const EIA = {
+  AL:7.25,AK:19.31,AZ:7.90,AR:6.61,CA:21.53,CO:8.62,CT:17.12,DE:8.49,DC:10.80,FL:8.50,
+  GA:7.21,HI:34.13,ID:7.69,IL:8.83,IN:8.15,IA:6.80,KS:7.73,KY:6.50,LA:5.61,ME:12.46,
+  MD:10.01,MA:18.19,MI:8.26,MN:9.15,MS:6.81,MO:7.87,MT:7.59,NE:7.66,NV:8.64,NH:16.21,
+  NJ:11.93,NM:5.43,NY:9.17,NC:7.77,ND:7.25,OH:7.10,OK:5.84,OR:8.05,PA:7.87,RI:19.70,
+  SC:6.84,SD:8.28,TN:6.21,TX:6.12,UT:7.86,VT:11.58,VA:8.99,WA:6.61,WV:7.81,WI:8.54,WY:7.96
+};
+const toMWh = (sc) => { const c = EIA[sc]; return c != null ? +(c * 10).toFixed(1) : 60; };
+
+const LF = {
+  AL:{n:"Alabama",f:0.96},AK:{n:"Alaska",f:1.32},AZ:{n:"Arizona",f:1.11},AR:{n:"Arkansas",f:0.96},
+  CA:{n:"California",f:1.33},CO:{n:"Colorado",f:1.09},CT:{n:"Connecticut",f:1.29},DE:{n:"Delaware",f:1.27},
+  DC:{n:"Washington D.C.",f:1.17},FL:{n:"Florida",f:0.96},GA:{n:"Georgia",f:0.98},HI:{n:"Hawaii",f:1.38},
+  ID:{n:"Idaho",f:1.02},IL:{n:"Illinois",f:1.23},IN:{n:"Indiana",f:1.02},IA:{n:"Iowa",f:1.04},
+  KS:{n:"Kansas",f:0.98},KY:{n:"Kentucky",f:1.00},LA:{n:"Louisiana",f:0.97},ME:{n:"Maine",f:1.02},
+  MD:{n:"Maryland",f:1.03},MA:{n:"Massachusetts",f:1.34},MI:{n:"Michigan",f:1.10},MN:{n:"Minnesota",f:1.09},
+  MS:{n:"Mississippi",f:0.95},MO:{n:"Missouri",f:1.11},MT:{n:"Montana",f:0.97},NE:{n:"Nebraska",f:0.99},
+  NV:{n:"Nevada",f:1.14},NH:{n:"New Hampshire",f:1.19},NJ:{n:"New Jersey",f:1.22},NM:{n:"New Mexico",f:1.00},
+  NY:{n:"New York",f:1.61},NC:{n:"North Carolina",f:0.96},ND:{n:"North Dakota",f:1.01},OH:{n:"Ohio",f:0.93},
+  OK:{n:"Oklahoma",f:1.00},OR:{n:"Oregon",f:1.22},PA:{n:"Pennsylvania",f:1.37},RI:{n:"Rhode Island",f:1.26},
+  SC:{n:"South Carolina",f:0.96},SD:{n:"South Dakota",f:0.98},TN:{n:"Tennessee",f:0.97},TX:{n:"Texas",f:0.93},
+  UT:{n:"Utah",f:0.98},VT:{n:"Vermont",f:1.02},VA:{n:"Virginia",f:1.16},WA:{n:"Washington",f:1.13},
+  WV:{n:"West Virginia",f:1.04},WI:{n:"Wisconsin",f:1.04},WY:{n:"Wyoming",f:1.00}
+};
+
+const CEPCI = {2018:603.1,2019:607.5,2020:596.2,2021:708.8,2022:816.0,2023:797.9,2024:810.5,2025:825.0,2026:840.0};
+
+const BASE_GP = 4.42;
+
+const SC = {
+  "Ammonia":{cat:"High Purity",cr:["99%"],bt:["Retrofit"],rps:"394k t NH₃/yr",rpu:"t NH₃/yr",rpc:394000,rco:413164,tic:37.356,toc:45.565,ccf:0.0551,fo:3.28,vo:2.67,pw:5.86,fl:0,cf:0.85,bs:"LA",
+    cx:{fg:.454,el:.338,ic:.121,cw:.041,si:.036,ds:.011,bd:.001}},
+  "Ethylene Oxide":{cat:"High Purity",cr:["99%"],bt:["Retrofit"],rps:"364.5k t EO/yr",rpu:"t EO/yr",rpc:364500,rco:103276,tic:16.636,toc:20.385,ccf:0.0474,fo:8.34,vo:1.66,pw:1.20,fl:0,cf:0.85,bs:"LA",
+    cx:{fg:.296,el:.383,ic:.221,cw:.036,si:.058,ds:.006,bd:.001}},
+  "Ethanol":{cat:"High Purity",cr:["99%"],bt:["Retrofit"],rps:"50M gal/yr",rpu:"M gal/yr",rpc:50,rco:121586,tic:20.187,toc:24.672,ccf:0.0696,fo:7.78,vo:1.75,pw:1.85,fl:0,cf:0.85,bs:"LA",
+    cx:{fg:.322,el:.380,ic:.193,cw:.040,si:.052,ds:.013,bd:.001}},
+  "NG Processing":{cat:"High Purity",cr:["99%"],bt:["Retrofit"],rps:"330 MMSCFD",rpu:"MMSCFD",rpc:330,rco:551816,tic:46.69,toc:56.764,ccf:0.0605,fo:2.86,vo:1.53,pw:6.12,fl:0,cf:0.85,bs:"LA",
+    cx:{fg:.552,el:.275,ic:.097,cw:.036,si:.029,ds:.010,bd:.001}},
+  "Coal-to-Liquids":{cat:"High Purity",cr:["99%"],bt:["Retrofit"],rps:"50k BPD FT",rpu:"BPD",rpc:50000,rco:65102701,tic:162.84,toc:196.924,ccf:0.0771,fo:0.58,vo:0.27,pw:43.6,fl:0,cf:0.85,bs:"LA",
+    cx:{fg:.691,el:.184,cw:.074,ic:.036,si:.012,ds:.004,bd:.001}},
+  "Gas-to-Liquids":{cat:"High Purity",cr:["99%"],bt:["Retrofit"],rps:"50k BPD FT",rpu:"BPD",rpc:50000,rco:1579952,tic:49.17,toc:59.661,ccf:0.0771,fo:1.04,vo:0.34,pw:6.73,fl:0,cf:0.85,bs:"LA",
+    cx:{fg:.566,el:.272,ic:.094,cw:.036,si:.028,ds:.004,bd:.001}},
+  "Refinery H₂":{cat:"Hydrogen",cr:["99%","90%"],bt:["Retrofit"],rps:"87k t H₂/yr",rpu:"t H₂/yr",rpc:87000,cf:0.85,bs:"LA",
+    vr:{"99%":{rco:340550,tic:130.63,toc:159.244,ccf:0.0455,fo:12.28,vo:5.08,pw:4.42,fl:10.68,
+      cx:{fg:.747,fw:.092,el:.085,ic:.033,cw:.028,si:.010,ds:.005,bd:.001}},
+    "90%":{rco:309545,tic:127.184,toc:154.978,ccf:0.0455,fo:12.28,vo:5.08,pw:4.01,fl:10.68,
+      cx:{fg:.752,fw:.088,el:.085,ic:.034,cw:.026,si:.010,ds:.005,bd:.001}}}},
+  "Cement":{cat:"Industrial",cr:["99%"],bt:["Retrofit"],rps:"1.3M t cement/yr",rpu:"M t/yr",rpc:1.3,cf:0.85,bs:"LA",
+    vr:{"99%":{rco:1213802,tic:338.949,toc:413.96,ccf:0.0535,fo:8.98,vo:5.88,pw:40.8,fl:15.66,
+      cx:{fg:.761,fw:.069,ds:.064,el:.057,cw:.028,ic:.015,si:.005,bd:.001}}}},
+  "Steel & Iron":{cat:"Industrial",cr:["99%","90%"],bt:["Retrofit"],rps:"2.54M t steel/yr",rpu:"M t/yr",rpc:2.54,cf:0.85,bs:"LA",
+    vr:{"99%":{rco:1873012,tic:456.696,toc:1160.313,ccf:0.0753,fo:15.87,vo:9.29,pw:58.5,fl:6.13,
+      cx:{fg:.782,fw:.072,ds:.052,el:.051,cw:.028,ic:.011,si:.004,bd:.001}},
+    "90%":{rco:1691426,tic:419.354,toc:1063.524,ccf:0.0753,fo:16.12,vo:11.05,pw:52.8,fl:7.28,
+      cx:{fg:.771,fw:.077,ds:.056,el:.051,cw:.030,ic:.011,si:.004,bd:.001}}}},
+  "Pulp & Paper":{cat:"Industrial",cr:["99%","90%"],bt:["Greenfield","Retrofit"],rps:"0.4M t pulp/yr",rpu:"M t/yr",rpc:0.4,cf:0.85,bs:"LA",
+    vr:{"99%|Greenfield":{rco:1311546,tic:337.271,toc:408.467,ccf:0.0535,fo:12.74,vo:7.17,pw:42.1,fl:0,
+      cx:{fg:.799,ds:.067,el:.053,fw:.037,cw:.024,ic:.015,si:.005,bd:.001}},
+    "90%|Greenfield":{rco:1190399,tic:322.627,toc:390.803,ccf:0.0535,fo:13.48,vo:7.50,pw:38.3,fl:0,
+      cx:{fg:.792,ds:.070,el:.055,fw:.037,cw:.025,ic:.015,si:.005,bd:.001}},
+    "99%|Retrofit":{rco:1311546,tic:349.261,toc:443.985,ccf:0.0535,fo:13.72,vo:7.51,pw:42.1,fl:9.58,
+      cx:{fg:.770,fw:.068,ds:.067,el:.053,cw:.023,ic:.015,si:.005,bd:.001}},
+    "90%|Retrofit":{rco:1190399,tic:332.733,toc:423.217,ccf:0.0535,fo:14.46,vo:7.84,pw:38.3,fl:9.66,
+      cx:{fg:.768,ds:.070,fw:.065,el:.054,cw:.024,ic:.015,si:.005,bd:.001}}}},
+  "NGCC F-Frame":{cat:"Power",cr:["90%"],bt:["Retrofit"],rps:"641 MW net",rpu:"MW net",rpc:641,rco:2161745,tic:601.463,toc:727.657,ccf:0.0773,fo:16.88,vo:10.74,pw:86.0,fl:82.86,cf:0.85,bs:"LA",
+    cx:{fg:.862,el:.056,fw:.032,cw:.022,st:.019,ic:.006,si:.002,bd:.001}},
+  "NGCC H-Frame":{cat:"Power",cr:["90%"],bt:["Retrofit"],rps:"878 MW net",rpu:"MW net",rpc:878,rco:2892332,tic:716.504,toc:866.916,ccf:0.0773,fo:15.97,vo:10.41,pw:114.0,fl:82.33,cf:0.85,bs:"LA",
+    cx:{fg:.859,el:.057,fw:.034,cw:.023,st:.020,ic:.006,si:.002,bd:.001}}
+};
+
+const CX_LABELS = {fg:"Flue Gas Cleanup",fw:"Feedwater & BOP",ds:"Ductwork & Stack",cw:"Cooling Water",el:"Electrical",ic:"I&C",si:"Site Improvements",bd:"Buildings",st:"Steam Turbine"};
+const CX_COLORS = {fg:"#3b82f6",fw:"#06b6d4",ds:"#8b5cf6",cw:"#10b981",el:"#f59e0b",ic:"#ec4899",si:"#64748b",bd:"#78716c",st:"#f97316"};
+
+function gv(src, cr, bt) {
+  const s = SC[src];
+  if (!s) return null;
+  if (s.vr) {
+    const d = s.vr[`${cr}|${bt}`] || s.vr[cr] || Object.values(s.vr)[0];
+    return { ...s, ...d };
+  }
+  return s;
+}
+
+function fm(n, d) { if (n == null || isNaN(n)) return "—"; return n.toLocaleString("en-US", { minimumFractionDigits: d !== undefined ? d : 2, maximumFractionDigits: d !== undefined ? d : 2 }); }
+function fd(n, d) { if (n == null || isNaN(n)) return "—"; return "$" + fm(n, d); }
+
+function CCUSModel() {
+  const [src, setSrc] = useState("Ammonia");
+  const [cr, setCr] = useState("99%");
+  const [bt, setBt] = useState("Retrofit");
+  const [st, setSt] = useState("TX");
+  const [yr, setYr] = useState(2025);
+  const [mode, setMode] = useState("co2");
+  const [co2Cap, setCo2Cap] = useState("");
+  const [plCap, setPlCap] = useState("");
+  const [pp, setPp] = useState(toMWh("TX"));
+  const [ppO, setPpO] = useState(false);
+  const [gp, setGp] = useState(BASE_GP);
+  const [gpO, setGpO] = useState(false);
+  const [cfIn, setCfIn] = useState("");
+  const [meth, setMeth] = useState(false);
+  const [tab, setTab] = useState("io");
+
+  const sd = SC[src];
+  const aR = sd ? sd.cr : ["99%"];
+  const aB = sd ? sd.bt : ["Retrofit"];
+
+  /* ── Glossary tooltip definitions ── */
+
+  useEffect(() => { if (!ppO) { setPp(toMWh(st)); } }, [st, ppO]);
+
+  const chSrc = useCallback((ns) => {
+    setSrc(ns);
+    const s = SC[ns];
+    if (s) {
+      if (!s.cr.includes(cr)) setCr(s.cr[0]);
+      if (!s.bt.includes(bt)) setBt(s.bt[0]);
+    }
+  }, [cr, bt]);
+
+  const res = useMemo(() => {
+    const vd = gv(src, cr, bt);
+    if (!vd) return null;
+    const refCO2 = vd.rco;
+    const refCF = vd.cf;
+    const userCF = parseFloat(cfIn);
+    const cf = (userCF > 0 && userCF <= 100) ? userCF / 100 : refCF;
+    const cfCustom = (userCF > 0 && userCF <= 100);
+    const isNGCC = src === "NGCC F-Frame" || src === "NGCC H-Frame";
+    /* For NGCC: equipment sized at 100% CF, but annual output uses actual CF */
+    const eqCF = isNGCC ? 1.0 : cf;
+    const cfRatio = eqCF / refCF;
+    let pCO2 = refCO2 * (cf / refCF), sR = cfRatio, cust = false;
+    const uC = parseFloat(co2Cap), uP = parseFloat(plCap);
+    if (mode === "co2" && uC > 0) { pCO2 = uC; sR = (pCO2 / (cf / refCF)) / refCO2; if (isNGCC) sR = (pCO2 / (1.0 / refCF)) / refCO2; cust = true; }
+    else if (mode === "plant" && uP > 0) { sR = uP / vd.rpc; pCO2 = refCO2 * sR * (cf / refCF); if (isNGCC) { sR = uP / vd.rpc; pCO2 = refCO2 * sR * (cf / refCF); } cust = true; }
+    else if (cfCustom) { cust = cfRatio !== 1; }
+    const cR = (CEPCI[yr] || CEPCI[2026]) / CEPCI[2018];
+    const lR = (LF[st] ? LF[st].f : 1) / (LF[vd.bs] ? LF[vd.bs].f : 0.97);
+    const cS = (sR !== 1) ? Math.pow(sR, 0.6) : 1;
+    const rT = vd.tic * 1e6, rO = vd.toc * 1e6, rOwn = rO - rT;
+    const sT = rT * cS * cR * lR, sOwn = rOwn * cS * cR * lR, sTOC = sT + sOwn;
+    const fS = (sR !== 1) ? Math.pow(1 / sR, 0.15) : 1;
+    const sFO = vd.fo * fS * cR, sVO = vd.vo * cR;
+    const sPW = vd.pw * sR;
+    const aPwr = sPW * pp * cf * 8760, pPt = aPwr / pCO2;
+    const capC = (sTOC * vd.ccf) / pCO2;
+    const bfl = vd.fl || 0;
+    const sFL = bfl * (gp / BASE_GP);
+    const cxData = vd.cx || {};
+    const cxBreak = Object.entries(cxData)
+      .filter(([,f]) => f > 0)
+      .map(([k, f]) => ({ key: k, label: CX_LABELS[k] || k, frac: f, val: sT * f, pt: (sT * f) / pCO2 }))
+      .sort((a, b) => b.val - a.val);
+    return {
+      vd, pCO2, sR, cust, cR, lR, cS, fS, rT, rOwn, sT, sOwn, sTOC,
+      tpt: sT / pCO2, opt: sOwn / pCO2, tocpt: sTOC / pCO2,
+      sFO, sVO, tOM: sFO + sVO, sPW, aPwr, pPt, capC,
+      sFL, bfl, hasFuel: bfl > 0, cxBreak, cf, cfCustom, isNGCC, eqCF,
+      total: capC + sFO + sVO + pPt + sFL, ccf: vd.ccf
+    };
+  }, [src, cr, bt, st, yr, mode, co2Cap, plCap, pp, gp, cfIn]);
+
+  const pie = res ? [
+    { name: "Capital", value: res.capC, color: "#3b82f6" },
+    { name: "Fixed O&M", value: res.sFO, color: "#10b981" },
+    { name: "Variable O&M", value: res.sVO, color: "#f59e0b" },
+    { name: "Power", value: res.pPt, color: "#ef4444" },
+    ...(res.sFL > 0 ? [{ name: "Nat Gas Fuel", value: res.sFL, color: "#a855f7" }] : [])
+  ] : [];
+
+  const bars = useMemo(() => {
+    if (!res) return [];
+    return Object.keys(SC).map(k => {
+      const dd = gv(k, SC[k].cr[0], SC[k].bt[0]);
+      if (!dd) return null;
+      const c2 = (CEPCI[yr] || CEPCI[2026]) / CEPCI[2018];
+      const l2 = (LF[st] ? LF[st].f : 1) / (LF[dd.bs] ? LF[dd.bs].f : 0.97);
+      const cap = (dd.toc * 1e6 * dd.ccf) / dd.rco * c2 * l2;
+      const fix = dd.fo * c2;
+      const vr2 = dd.vo * c2;
+      const pwr = (dd.pw * pp * dd.cf * 8760) / dd.rco;
+      const fuel = (dd.fl || 0) * (gp / BASE_GP);
+      const nm = k.length > 13 ? k.substring(0, 12) + "…" : k;
+      return { name: nm, Capital: +cap.toFixed(2), "Fixed O&M": +fix.toFixed(2), "Variable O&M": +vr2.toFixed(2), Power: +pwr.toFixed(2), "Nat Gas": +fuel.toFixed(2), total: +(cap + fix + vr2 + pwr + fuel).toFixed(2) };
+    }).filter(Boolean).sort((a, b) => a.total - b.total);
+  }, [yr, st, pp, gp, res]);
+
+  const vd = gv(src, cr, bt);
+  const eC = EIA[st];
+  const eM = toMWh(st);
+
+  /* ── Clean flat styles — no rounded corners, no shadows ── */
+  const sec = { background: "#ffffff", border: "1px solid #e2e8f0", marginBottom: 14 };
+  const secH = { padding: "12px 18px", fontSize: 12, fontWeight: 800, color: "#1e293b", textTransform: "uppercase", letterSpacing: "0.08em", borderBottom: "1px solid #e2e8f0", borderLeft: "3px solid #3b82f6" };
+  const row = { display: "flex", alignItems: "center", justifyContent: "space-between", padding: "10px 18px", borderBottom: "1px solid #f1f5f9", minHeight: 42 };
+  const rowL = { fontSize: 13.5, color: "#334155", fontWeight: 500 };
+  const rowR = { display: "flex", alignItems: "center", gap: 8 };
+  const fi = { width: 130, padding: "7px 12px", fontSize: 13.5, fontWeight: 600, color: "#1e293b", background: "#f9fafb", border: "1px solid #e2e8f0", borderRadius: 0, outline: "none", textAlign: "right", boxSizing: "border-box" };
+  const fSel = { ...fi, width: "auto", minWidth: 160, textAlign: "left", cursor: "pointer" };
+  const unit = { fontSize: 12.5, color: "#94a3b8", fontWeight: 500, minWidth: 50 };
+  const sub = { fontSize: 11, color: "#94a3b8", fontWeight: 400, padding: "2px 18px 10px", marginTop: -4 };
+  const cd = { background: "#ffffff", padding: "16px 18px", border: "1px solid #e2e8f0" };
+  const ch = { margin: "0 0 12px", fontSize: 11, fontWeight: 700, color: "#64748b", textTransform: "uppercase", letterSpacing: "0.06em" };
+  const thd = { padding: "0 0 6px", fontSize: 10, color: "#64748b", fontWeight: 600, textTransform: "uppercase", borderBottom: "1px solid #e2e8f0" };
+
+  const tabs = [
+    { id: "io", label: "Inputs & Outputs" },
+    { id: "model", label: "Model" },
+    { id: "charts", label: "Charts" },
+    { id: "sensitivity", label: "Sensitivity" },
+    { id: "assumptions", label: "Assumptions" }
+  ];
+
+  return (
+    <div style={{ fontFamily: "system-ui, sans-serif", background: "#f8fafc", color: "#1e293b", minHeight: "100vh" }}>
+      {/* Header */}
+      <div style={{ background: "linear-gradient(135deg, #ffffff, #f1f5f9, #ffffff)", borderBottom: "1px solid #e2e8f0", padding: "20px 24px" }}>
+        <div style={{ maxWidth: 1280, margin: "0 auto", display: "flex", alignItems: "center", gap: 12 }}>
+          <div style={{ width: 38, height: 38, borderRadius: 0, background: "linear-gradient(135deg, #2563eb, #0ea5e9)", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 13, fontWeight: 800, color: "#fff" }}>CO₂</div>
+          <div>
+            <div style={{ fontSize: 20, fontWeight: 700, color: "#0f172a" }}>CCUS Cost of Capture Model</div>
+            <div style={{ fontSize: 11, color: "#64748b" }}>NETL Data {"·"} CEPCI {"·"} Location Factors {"·"} EIA Power Pricing {"·"} Nat Gas Fuel {"·"} Six-Tenths Scaling &nbsp;<span style={{ fontSize: 9.5, color: "#94a3b8", background: "#1e293b", padding: "1px 6px", borderRadius: 0, verticalAlign: "middle" }}>hover <span style={{ borderBottom: "1px dotted #94a3b8" }}>dotted terms</span> for definitions</span></div>
+          </div>
+        </div>
+      </div>
+
+      <div style={{ maxWidth: 1280, margin: "0 auto", padding: "0 24px 40px" }}>
+        {/* Tab bar */}
+        <div style={{ display: "flex", gap: 0, borderBottom: "1px solid #e2e8f0", marginBottom: 20, paddingTop: 12 }}>
+          {tabs.map(t => (
+            <button key={t.id} onClick={() => setTab(t.id)}
+              style={{ padding: "10px 22px", fontSize: 13, fontWeight: 600, border: "none", cursor: "pointer", background: "transparent",
+                color: tab === t.id ? "#3b82f6" : "#64748b",
+                borderBottom: tab === t.id ? "2px solid #3b82f6" : "2px solid transparent",
+                marginBottom: -1, transition: "all 0.15s" }}>
+              {t.label}
+            </button>
+          ))}
+        </div>
+
+        {/* ===================== TAB: INPUTS & OUTPUTS ===================== */}
+        {tab === "io" && (
+          <div style={{ display: "grid", gridTemplateColumns: "340px 1fr", gap: 20, alignItems: "start" }}>
+
+            {/* ═══════ LEFT COLUMN: ALL INPUTS ═══════ */}
+            <div style={{ position: "sticky", top: 16 }}>
+              <div style={sec}>
+                <div style={secH}>Capture Configuration</div>
+                <div style={row}>
+                  <span style={rowL}><Tip k="Emission Source">Emission Source</Tip></span>
+                  <select value={src} onChange={(e) => chSrc(e.target.value)} style={{...fSel, minWidth: 140}}>
+                    <optgroup label="High Purity">{["Ammonia","Ethylene Oxide","Ethanol","NG Processing","Coal-to-Liquids","Gas-to-Liquids"].map(s => <option key={s} value={s}>{s}</option>)}</optgroup>
+                    <optgroup label="Industrial / Hydrogen">{["Refinery H₂","Cement","Steel & Iron","Pulp & Paper"].map(s => <option key={s} value={s}>{s}</option>)}</optgroup>
+                    <optgroup label="Power Generation">{["NGCC F-Frame","NGCC H-Frame"].map(s => <option key={s} value={s}>{s}</option>)}</optgroup>
+                  </select>
+                </div>
+                <div style={row}>
+                  <span style={rowL}><Tip k="Capture Config">Capture Rate</Tip></span>
+                  <select value={cr} onChange={(e) => setCr(e.target.value)} style={{...fi, width: 80, textAlign: "left", cursor: "pointer"}} disabled={aR.length <= 1}>
+                    {aR.map(r => <option key={r} value={r}>{r}</option>)}
+                  </select>
+                </div>
+                <div style={{...row, borderBottom: "none"}}>
+                  <span style={rowL}><Tip k="Retrofit">Build Type</Tip></span>
+                  <select value={bt} onChange={(e) => setBt(e.target.value)} style={{...fi, width: 100, textAlign: "left", cursor: "pointer"}} disabled={aB.length <= 1}>
+                    {aB.map(b => <option key={b} value={b}>{b}</option>)}
+                  </select>
+                </div>
+              </div>
+
+              <div style={sec}>
+                <div style={{...secH, borderLeft: "3px solid #06b6d4"}}>Production Parameters</div>
+                <div style={row}>
+                  <span style={rowL}>Input Mode</span>
+                  <div style={{ display: "flex", borderRadius: 0, overflow: "hidden", border: "1px solid #e2e8f0" }}>
+                    {["co2", "plant"].map(m => (
+                      <button key={m} onClick={() => setMode(m)} style={{ padding: "5px 12px", fontSize: 11, fontWeight: 600, border: "none", cursor: "pointer", background: mode === m ? "#3b82f6" : "#f9fafb", color: mode === m ? "#fff" : "#94a3b8" }}>
+                        {m === "co2" ? "CO₂ t/yr" : "Plant Cap"}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+                <div style={row}>
+                  <span style={rowL}>{mode === "co2" ? <Tip k="Project CO₂">Target CO₂</Tip> : "Plant Capacity"}</span>
+                  <div style={rowR}>
+                    <input type="number" value={mode === "co2" ? co2Cap : plCap} onChange={(e) => mode === "co2" ? setCo2Cap(e.target.value) : setPlCap(e.target.value)} placeholder={mode === "co2" ? fm(vd ? vd.rco : 0, 0) : fm(vd ? vd.rpc : 0, 0)} style={{...fi, width: 110}} />
+                    <span style={unit}>{mode === "co2" ? "t/yr" : (vd ? vd.rpu : "")}</span>
+                  </div>
+                </div>
+                <div style={{...row, borderBottom: "none"}}>
+                  <span style={rowL}><Tip k="Capacity Factor">Capacity Factor</Tip></span>
+                  <div style={rowR}>
+                    <input type="number" value={cfIn} onChange={(e) => setCfIn(e.target.value)} placeholder="85" min="1" max="100" step="1" style={{...fi, width: 70}} />
+                    <span style={unit}>%</span>
+                  </div>
+                </div>
+                {(src === "NGCC F-Frame" || src === "NGCC H-Frame") && cfIn && (<div style={sub}>Equip sized at 100% CF; operating at {cfIn}%</div>)}
+              </div>
+
+              <div style={sec}>
+                <div style={{...secH, borderLeft: "3px solid #8b5cf6"}}>Cost Basis</div>
+                <div style={row}>
+                  <span style={rowL}><Tip k="Location Factor">Project State</Tip></span>
+                  <select value={st} onChange={(e) => setSt(e.target.value)} style={{...fSel, minWidth: 130}}>
+                    {Object.entries(LF).sort((a, b) => a[1].n.localeCompare(b[1].n)).map(([c, d]) => (<option key={c} value={c}>{d.n} ({c})</option>))}
+                  </select>
+                </div>
+                <div style={{...row, borderBottom: "none"}}>
+                  <span style={rowL}><Tip k="Cost Year">Cost Year</Tip></span>
+                  <select value={yr} onChange={(e) => setYr(parseInt(e.target.value))} style={{...fi, width: 80, textAlign: "left", cursor: "pointer"}}>
+                    {Object.keys(CEPCI).map(y => <option key={y} value={y}>{y}</option>)}
+                  </select>
+                </div>
+              </div>
+
+              <div style={sec}>
+                <div style={{...secH, borderLeft: "3px solid #ef4444"}}>Energy Costs</div>
+                <div style={row}>
+                  <span style={rowL}><Tip k="Power Cost">Electricity</Tip></span>
+                  <div style={rowR}>
+                    <input type="number" value={pp} onChange={(e) => { setPp(parseFloat(e.target.value) || 0); setPpO(true); }} style={{...fi, width: 90}} />
+                    <span style={unit}>$/MWh</span>
+                  </div>
+                </div>
+                <div style={sub}>{ppO ? <span style={{color:"#f59e0b"}}>Manual — <span onClick={()=>{setPpO(false);setPp(toMWh(st));}} style={{cursor:"pointer",textDecoration:"underline"}}>reset</span></span> : <span>EIA: {eC}¢/kWh ({LF[st] ? LF[st].n : st})</span>}</div>
+                <div style={row}>
+                  <span style={rowL}><Tip k="Natural Gas Fuel">Nat Gas</Tip></span>
+                  <div style={rowR}>
+                    <input type="number" value={gp} onChange={(e) => { setGp(parseFloat(e.target.value) || 0); setGpO(true); }} step="0.01" style={{...fi, width: 90}} />
+                    <span style={unit}>$/MMBtu</span>
+                  </div>
+                </div>
+                <div style={{...sub, paddingBottom: 12}}>{gpO ? <span style={{color:"#f59e0b"}}>Manual — <span onClick={()=>{setGpO(false);setGp(BASE_GP);}} style={{cursor:"pointer",textDecoration:"underline"}}>reset</span></span> : <span>NETL base: ${BASE_GP}/MMBtu</span>}</div>
+              </div>
+            </div>
+
+            {/* ═══════ RIGHT COLUMN: ALL OUTPUTS ═══════ */}
+            <div>
+              {res ? (<div>
+                <div style={sec}>
+                  <div style={{...secH, borderLeft: "3px solid #8b5cf6"}}>CAPEX Summary</div>
+                  <table style={{width:"100%",borderCollapse:"collapse"}}>
+                    <thead><tr><th style={{...thd,padding:"6px 18px"}}></th><th style={{...thd,textAlign:"right",padding:"6px 18px"}}>$M</th><th style={{...thd,textAlign:"right",padding:"6px 18px",width:44}}>%</th></tr></thead>
+                    <tbody>
+                      {res.cxBreak.map((c,i)=>(<tr key={i} style={{borderBottom:"1px solid #f1f5f9"}}><td style={{padding:"6px 18px",fontSize:12,color:"#64748b"}}><span style={{display:"inline-block",width:7,height:7,borderRadius:0,background:CX_COLORS[c.key]||"#475569",marginRight:8,verticalAlign:"middle"}} />{c.label}</td><td style={{padding:"6px 18px",fontSize:12,color:"#1e293b",textAlign:"right",fontVariantNumeric:"tabular-nums"}}>{fd(c.val/1e6,1)}</td><td style={{padding:"6px 18px",fontSize:11,color:"#94a3b8",textAlign:"right"}}>{(c.frac*100).toFixed(1)}</td></tr>))}
+                      <tr style={{borderTop:"2px solid #e2e8f0"}}><td style={{padding:"7px 18px",fontSize:12,color:"#1e293b",fontWeight:700}}>TIC Total</td><td style={{padding:"7px 18px",fontSize:12,color:"#1e293b",textAlign:"right",fontWeight:700}}>{fd(res.sT/1e6,1)}M</td><td style={{padding:"7px 18px",fontSize:11,color:"#94a3b8",textAlign:"right"}}>100</td></tr>
+                      <tr style={{borderBottom:"1px solid #f1f5f9"}}><td style={{padding:"6px 18px",fontSize:12,color:"#64748b"}}><Tip k="Owner’s Costs">Owner’s Costs</Tip></td><td colSpan={2} style={{padding:"6px 18px",fontSize:12,color:"#1e293b",textAlign:"right"}}>{fd(res.sOwn/1e6,1)}M</td></tr>
+                      <tr style={{background:"#f8fafc"}}><td style={{padding:"8px 18px",fontSize:13,color:"#0f172a",fontWeight:800}}><Tip k="TOC">Total CAPEX (TOC)</Tip></td><td colSpan={2} style={{padding:"8px 18px",fontSize:13,color:"#0f172a",textAlign:"right",fontWeight:800}}>{fd(res.sTOC/1e6,1)}M</td></tr>
+                    </tbody>
+                  </table>
+                </div>
+
+                {/* OPEX Summary — right after CAPEX */}
+                <div style={sec}>
+                  <div style={{...secH, borderLeft:"3px solid #10b981"}}>OPEX Summary</div>
+                  <table style={{width:"calc(100% - 36px)",borderCollapse:"collapse",margin:"0 18px"}}>
+                    <thead><tr><th style={thd}></th><th style={{...thd,textAlign:"right"}}>$/t CO₂</th></tr></thead>
+                    <tbody>
+                      {[["Fixed O&M",fd(res.sFO),"Fixed O&M"],["Variable O&M",fd(res.sVO),"Variable O&M"]].map((r,i)=>(<tr key={i} style={{borderBottom:"1px solid #f1f5f9"}}><td style={{padding:"6px 0",fontSize:12,color:"#64748b"}}><Tip k={r[2]}>{r[0]}</Tip></td><td style={{padding:"6px 0",fontSize:12,color:"#1e293b",textAlign:"right",fontWeight:500}}>{r[1]}/t</td></tr>))}
+                      <tr style={{borderTop:"2px solid #e2e8f0"}}><td style={{padding:"7px 0",fontSize:12,color:"#1e293b",fontWeight:700}}><Tip k="Total O&M">Total O&M</Tip></td><td style={{padding:"7px 0",fontSize:12,color:"#1e293b",textAlign:"right",fontWeight:700}}>{fd(res.tOM)}/t</td></tr>
+                    </tbody>
+                  </table>
+                </div>
+
+                {/* Power Cost + Nat Gas Fuel — right after OPEX */}
+                <div style={{display:"grid",gridTemplateColumns: res.hasFuel ? "1fr 1fr" : "1fr",gap:12,marginTop:0}}>
+                  <div style={{...sec, borderLeft:"3px solid #ef4444"}}>
+                    <div style={{...secH, borderLeft:"none"}}><Tip k="Power Cost">Power Cost</Tip>
+                      <span style={{marginLeft:"auto",float:"right",fontSize:10,fontWeight:500,color:ppO?"#f59e0b":"#64748b",background:ppO?"rgba(245,158,11,0.12)":"rgba(100,116,139,0.08)",padding:"1px 8px",borderRadius:0,textTransform:"none",letterSpacing:0}}>{ppO ? "Manual Override" : "EIA · " + (LF[st]?LF[st].n:st)}</span>
+                    </div>
+                    <div style={{padding:"0 18px 14px"}}>
+                      <div style={{display:"flex",justifyContent:"space-between",padding:"8px 0",borderBottom:"1px solid #f1f5f9"}}>
+                        <span style={{fontSize:12,color:"#64748b"}}>Power Demand</span>
+                        <span style={{fontSize:12,color:"#1e293b",fontWeight:600}}>{fm(res.sPW,1)} MW</span>
+                      </div>
+                      <div style={{display:"flex",justifyContent:"space-between",padding:"8px 0",borderBottom:"1px solid #f1f5f9"}}>
+                        <span style={{fontSize:12,color:"#64748b"}}>Electricity Rate</span>
+                        <span style={{fontSize:12,color:"#1e293b",fontWeight:600}}>${pp}/MWh</span>
+                      </div>
+                      <div style={{display:"flex",justifyContent:"space-between",padding:"8px 0",borderBottom:"1px solid #f1f5f9"}}>
+                        <span style={{fontSize:12,color:"#64748b"}}>Capacity Factor</span>
+                        <span style={{fontSize:12,color:"#1e293b",fontWeight:600}}>{(res.cf*100).toFixed(0)}%</span>
+                      </div>
+                      <div style={{display:"flex",justifyContent:"space-between",padding:"8px 0",borderBottom:"1px solid #f1f5f9"}}>
+                        <span style={{fontSize:12,color:"#64748b"}}><Tip k="Annual Power Cost">Annual Power Cost</Tip></span>
+                        <span style={{fontSize:12,color:"#1e293b",fontWeight:600}}>{fd(res.aPwr/1e6,1)}M/yr</span>
+                      </div>
+                      <div style={{display:"flex",justifyContent:"space-between",padding:"10px 0"}}>
+                        <span style={{fontSize:13,color:"#ef4444",fontWeight:700}}>Power $/t CO₂</span>
+                        <span style={{fontSize:13,color:"#ef4444",fontWeight:700}}>{fd(res.pPt)}/t</span>
+                      </div>
+                    </div>
+                  </div>
+                  {res.hasFuel && (
+                    <div style={{...sec, borderLeft:"3px solid #a855f7"}}>
+                      <div style={{...secH, borderLeft:"none"}}><Tip k="Natural Gas Fuel">Natural Gas Fuel Cost</Tip>
+                        <span style={{marginLeft:"auto",float:"right",fontSize:10,fontWeight:500,color:gpO?"#f59e0b":"#64748b",background:gpO?"rgba(245,158,11,0.12)":"rgba(100,116,139,0.08)",padding:"1px 8px",borderRadius:0,textTransform:"none",letterSpacing:0}}>{gpO?"Manual":"NETL Base"}</span>
+                      </div>
+                      <div style={{padding:"0 18px 14px"}}>
+                        <div style={{display:"flex",justifyContent:"space-between",padding:"8px 0",borderBottom:"1px solid #f1f5f9"}}>
+                          <span style={{fontSize:12,color:"#64748b"}}>Gas Price</span>
+                          <span style={{fontSize:12,color:"#1e293b",fontWeight:600}}>${gp}/MMBtu</span>
+                        </div>
+                        <div style={{display:"flex",justifyContent:"space-between",padding:"8px 0",borderBottom:"1px solid #f1f5f9"}}>
+                          <span style={{fontSize:12,color:"#64748b"}}>NETL Base Fuel Cost</span>
+                          <span style={{fontSize:12,color:"#1e293b",fontWeight:600}}>${res.bfl.toFixed(2)}/t</span>
+                        </div>
+                        <div style={{display:"flex",justifyContent:"space-between",padding:"8px 0",borderBottom:"1px solid #f1f5f9"}}>
+                          <span style={{fontSize:12,color:"#64748b"}}>Reference Gas Price</span>
+                          <span style={{fontSize:12,color:"#1e293b",fontWeight:600}}>${BASE_GP}/MMBtu</span>
+                        </div>
+                        <div style={{display:"flex",justifyContent:"space-between",padding:"10px 0"}}>
+                          <span style={{fontSize:13,color:"#a855f7",fontWeight:700}}>Fuel $/t CO₂</span>
+                          <span style={{fontSize:13,color:"#a855f7",fontWeight:700}}>{fd(res.sFL)}/t</span>
+                        </div>
+                        <div style={{fontSize:10,color:"#94a3b8",marginTop:2}}>Scaled: base cost × (gas price ÷ ref price)</div>
+                      </div>
+                    </div>
+                  )}
+                </div>
+
+                {/* COC Table — right after energy costs */}
+                <div style={cd}>
+                    <h3 style={ch}><Tip k="COC">Cost of CO₂ Captured</Tip></h3>
+                    <table style={{width:"100%",borderCollapse:"collapse"}}>
+                      <thead><tr><th style={thd}></th><th style={{...thd,textAlign:"right"}}>$/t</th><th style={{...thd,textAlign:"right"}}>Share</th></tr></thead>
+                      <tbody>
+                        {[{n:"CAPEX",gk:"Capital Charge",v:res.capC,c:"#3b82f6"},{n:"Fixed O&M",gk:"Fixed O&M",v:res.sFO,c:"#10b981"},{n:"Variable O&M",gk:"Variable O&M",v:res.sVO,c:"#f59e0b"},{n:"Power",gk:"Power Cost",v:res.pPt,c:"#ef4444"},...(res.hasFuel?[{n:"Nat Gas Fuel",gk:"Natural Gas Fuel",v:res.sFL,c:"#a855f7"}]:[])].map((r,i)=>(<tr key={i} style={{borderBottom:"1px solid #f1f5f9"}}><td style={{padding:"6px 0",fontSize:11.5,color:"#64748b"}}><span style={{display:"inline-block",width:7,height:7,borderRadius:0,background:r.c,marginRight:6,verticalAlign:"middle"}} /><Tip k={r.gk}>{r.n}</Tip></td><td style={{padding:"6px 4px",fontSize:11.5,color:"#1e293b",textAlign:"right",fontWeight:500,fontVariantNumeric:"tabular-nums"}}>{fd(r.v)}</td><td style={{padding:"6px 0",fontSize:10,color:"#94a3b8",textAlign:"right"}}>{(r.v/res.total*100).toFixed(1)}%</td></tr>))}
+                        <tr style={{borderTop:"1px solid #cbd5e1"}}><td style={{padding:"8px 0",fontSize:13,color:"#3b82f6",fontWeight:700}}><Tip k="COC">Total COC</Tip></td><td style={{padding:"8px 4px",fontSize:13,color:"#3b82f6",textAlign:"right",fontWeight:700}}>{fd(res.total)}</td><td style={{padding:"8px 0",fontSize:10,color:"#94a3b8",textAlign:"right"}}>100%</td></tr>
+                      </tbody>
+                    </table>
+                </div>
+
+              </div>) : (<div style={{padding:40,textAlign:"center",color:"#94a3b8"}}>Select inputs to see results</div>)}
+            </div>
+
+          </div>
+        )}
+
+                {/* ===================== TAB: MODEL ===================== */}
+        {tab === "model" && res && (() => {
+          const v = res.vd;
+          const fc = (title, formula, note, color) => (
+            <div style={{ background: "#ffffff", borderRadius: 0, padding: "12px 14px", borderLeft: "3px solid " + color, border: "1px solid #e2e8f0" }}>
+              <div style={{ fontSize: 11.5, fontWeight: 700, color: "#1e293b", marginBottom: 6 }}>{title}</div>
+              <div style={{ fontFamily: "Courier New, monospace", fontSize: 11, color: "#475569", whiteSpace: "pre-wrap", lineHeight: 1.5, background: "#f1f5f9", borderRadius: 0, padding: "8px 10px", marginBottom: 6, border: "1px solid #e2e8f0" }}>{formula}</div>
+              <div style={{ fontSize: 10, color: "#94a3b8", lineHeight: 1.4 }}>{note}</div>
+            </div>
+          );
+          const cr2 = (label, value, unit, hl) => (
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "5px 0", borderBottom: "1px solid #e2e8f0" }}>
+              <span style={{ fontSize: 11, color: hl ? "#3b82f6" : "#94a3b8", fontWeight: hl ? 700 : 400 }}>{label}</span>
+              <span style={{ fontSize: 11, color: hl ? "#3b82f6" : "#1e293b", fontWeight: hl ? 700 : 600, fontVariantNumeric: "tabular-nums" }}>{value}{unit ? " " + unit : ""}</span>
+            </div>
+          );
+          return (
+          <div>
+            <div style={{ display: "flex", gap: 6, marginBottom: 16, flexWrap: "wrap" }}>
+              {[
+                { l: src, val: cr + " " + bt, c: "#3b82f6" },
+                { l: "CEPCI", val: res.cR.toFixed(3) + "×", c: "#8b5cf6" },
+                { l: "Loc", val: st + " " + res.lR.toFixed(3) + "×", c: "#06b6d4" },
+                ...(res.cust ? [{ l: "Scale", val: res.sR.toFixed(2) + "×", c: "#f59e0b" }] : []),
+              ].map((p, i) => (
+                <div key={i} style={{ display: "inline-flex", alignItems: "center", gap: 5, background: "#ffffff", border: "1px solid " + p.c + "33", borderRadius: 0, padding: "3px 10px" }}>
+                  <div style={{ width: 5, height: 5, borderRadius: 0, background: p.c }} />
+                  <span style={{ fontSize: 10, color: "#94a3b8" }}>{p.l}</span>
+                  <span style={{ fontSize: 11, fontWeight: 700, color: p.c }}>{p.val}</span>
+                </div>
+              ))}
+            </div>
+
+            <div style={{ fontSize: 16, fontWeight: 700, color: "#0f172a", marginBottom: 12 }}>Key Formulas</div>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 24 }}>
+              {fc("Scaled TIC ($M)", "= TIC_ref × Scale^0.6 × CEPCI_ratio × Loc_ratio", "TIC_ref = $" + (v ? v.tic : 0) + "M (NETL 2018, " + (v ? v.bs : "LA") + " base). Result: " + fd(res.sT / 1e6, 1) + "M", "#3b82f6")}
+              {fc("Total Overnight Cost (TOC)", "= Scaled_TIC + Scaled_Owners_Costs", "TOC = " + fd(res.sT / 1e6, 1) + "M + " + fd(res.sOwn / 1e6, 1) + "M = " + fd(res.sTOC / 1e6, 1) + "M", "#8b5cf6")}
+              {fc("CEPCI Escalation Ratio", "= CEPCI[" + yr + "] / CEPCI[2018]\n= " + (CEPCI[yr] || CEPCI[2026]) + " / " + CEPCI[2018], "Escalates 2018 USD to " + yr + " USD. Result: " + res.cR.toFixed(4) + "×", "#8b5cf6")}
+              {fc("Location Factor Ratio", "= LF[" + st + "] / LF[" + (v ? v.bs : "LA") + "]\n= " + (LF[st] ? LF[st].f.toFixed(2) : "1.00") + " / " + (v && LF[v.bs] ? LF[v.bs].f.toFixed(2) : "0.97"), "Adjusts from " + (v ? v.bs : "LA") + " base to " + (LF[st] ? LF[st].n : st) + ". Result: " + res.lR.toFixed(4) + "×", "#06b6d4")}
+              {fc("Capacity Scaling Factor", "= (Capacity_ratio) ^ 0.6\n= (" + res.sR.toFixed(4) + ") ^ 0.6", "Six-tenths rule. Result: " + res.cS.toFixed(4) + "×" + (!res.cust ? " (ref case, no scaling)" : ""), "#f59e0b")}
+              {(() => {
+                const refCO2 = v ? v.rco : 0;
+                const refCFpct = ((v ? v.cf : 0.85) * 100).toFixed(0);
+                const cfPct = (res.cf * 100).toFixed(0);
+                let formula, note;
+                if (res.cust && mode === "co2") {
+                  formula = "= User input (direct)\n= " + fm(res.pCO2, 0) + " t/yr";
+                  note = "Directly specified. Ref: " + fm(refCO2, 0) + " t/yr at " + refCFpct + "% CF.";
+                } else if (res.cust && mode === "plant") {
+                  formula = "= Ref_CO₂ × Scale_ratio × (CF / Ref_CF)\n= " + fm(refCO2, 0) + " × " + res.sR.toFixed(4) + " × (" + cfPct + "% / " + refCFpct + "%)";
+                  note = "Scaled from plant capacity input. Result: " + fm(res.pCO2, 0) + " t/yr";
+                } else {
+                  formula = "= Ref_CO₂ × (CF / Ref_CF)\n= " + fm(refCO2, 0) + " × (" + cfPct + "% / " + refCFpct + "%)";
+                  note = "Ref: " + fm(refCO2, 0) + " t/yr at " + refCFpct + "% CF. Result: " + fm(res.pCO2, 0) + " t/yr";
+                }
+                if (res.isNGCC) note += " NGCC: equip sized at 100% CF, output uses " + cfPct + "% operating CF.";
+                return fc("Project CO₂ (t/yr)", formula, note, "#06b6d4");
+              })()}
+              {fc("Capital Charge ($/t CO2)", "= (TOC × CCF) / CO2_captured\n= (" + fd(res.sTOC / 1e6, 1) + "M × " + (res.ccf * 100).toFixed(2) + "%) / " + fm(res.pCO2, 0), "Result: " + fd(res.capC) + "/t CO2", "#3b82f6")}
+              {fc("Power Cost ($/t CO2)", "= (MW × $/MWh × CF × 8760) / CO2\n= (" + fm(res.sPW, 1) + " × $" + pp + " × " + (v ? v.cf : 0.85) + " × 8760) / " + fm(res.pCO2, 0), "Price: $" + pp + "/MWh (" + (ppO ? "manual" : "EIA " + (LF[st] ? LF[st].n : st)) + "). Result: " + fd(res.pPt) + "/t", "#ef4444")}
+              {fc("O&M Costs ($/t CO2)", "Fixed_OM  = " + fd(v ? v.fo : 0) + " × scale_adj × CEPCI\nVar_OM    = " + fd(v ? v.vo : 0) + " × CEPCI", "Fixed: " + fd(res.sFO) + "/t, Variable: " + fd(res.sVO) + "/t, Total: " + fd(res.tOM) + "/t", "#10b981")}
+              {res.hasFuel ? fc("Natural Gas Fuel ($/t CO2)", "= Fuel_ref × (Gas_price / Gas_ref)\n= $" + res.bfl.toFixed(2) + " × ($" + gp + " / $" + BASE_GP + ")", "Result: " + fd(res.sFL) + "/t CO2. Amine regen steam.", "#a855f7") : fc("Natural Gas Fuel", "= 0 (not applicable)", "High-purity source: no amine regeneration needed.", "#475569")}
+              {fc("Cost of CO2 Captured (COC)", "= Capital + Fixed_OM + Var_OM + Power + Fuel\n= " + fd(res.capC) + " + " + fd(res.sFO) + " + " + fd(res.sVO) + " + " + fd(res.pPt) + (res.hasFuel ? " + " + fd(res.sFL) : ""), "Total: " + fd(res.total) + "/t CO2", "#3b82f6")}
+            </div>
+
+            <div style={{ fontSize: 16, fontWeight: 700, color: "#0f172a", marginBottom: 12 }}>Intermediate Calculations</div>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 12 }}>
+              <div style={cd}>
+                <h3 style={ch}>CAPEX Scaling</h3>
+                {cr2("NETL Ref TIC", fd(res.rT / 1e6, 1) + "M")}
+                {cr2("NETL Ref Owners", fd(res.rOwn / 1e6, 1) + "M")}
+                {cr2("NETL Ref TOC", fd((res.rT + res.rOwn) / 1e6, 1) + "M")}
+                {cr2("CEPCI Ratio", res.cR.toFixed(4) + "×")}
+                {cr2("Location Ratio", res.lR.toFixed(4) + "×")}
+                {cr2("Capacity Scale", res.cS.toFixed(4) + "×")}
+                {cr2("Scaled TIC", fd(res.sT / 1e6, 1) + "M", null, true)}
+                {cr2("Scaled Owners", fd(res.sOwn / 1e6, 1) + "M")}
+                {cr2("Scaled TOC", fd(res.sTOC / 1e6, 1) + "M", null, true)}
+              </div>
+              <div style={cd}>
+                <h3 style={ch}>Cost Breakdown ($/t CO2)</h3>
+                {cr2("Capital Charge", fd(res.capC))}
+                {cr2("CCF", (res.ccf * 100).toFixed(2) + "%")}
+                {cr2("Fixed O&M", fd(res.sFO))}
+                {cr2("Variable O&M", fd(res.sVO))}
+                {cr2("Total O&M", fd(res.tOM))}
+                {cr2("Power", fd(res.pPt))}
+                {res.hasFuel && cr2("Nat Gas Fuel", fd(res.sFL))}
+                {cr2("Total COC", fd(res.total), null, true)}
+              </div>
+              <div style={cd}>
+                <h3 style={ch}>Power and Operations</h3>
+                {cr2("Power Demand", fm(res.sPW, 1) + " MW")}
+                {cr2("Power Price", "$" + pp + "/MWh")}
+                {cr2("Capacity Factor", (res.cf * 100).toFixed(0) + "%" + (res.cfCustom ? " (custom)" : "") + (res.isNGCC ? " — equip sized at " + (res.eqCF * 100).toFixed(0) + "%" : ""))}
+                {cr2("Annual Hours", "8,760 hrs")}
+                {cr2("Annual Power Cost", fd(res.aPwr / 1e6, 1) + "M")}
+                {cr2("Ref CO₂ Captured", fm(v ? v.rco : 0, 0) + " t/yr")}
+                {cr2("Ref Capacity Factor", ((v ? v.cf : 0.85) * 100).toFixed(0) + "%")}
+                {cr2("Project CO₂", fm(res.pCO2, 0) + " t/yr", null, true)}
+                {res.hasFuel && cr2("Base Fuel Cost", "$" + res.bfl.toFixed(2) + "/t")}
+                {res.hasFuel && cr2("Gas Price", "$" + gp + "/MMBtu")}
+                {res.hasFuel && cr2("Gas Ref Price", "$" + BASE_GP + "/MMBtu")}
+              </div>
+            </div>
+          </div>);
+        })()}
+
+        {/* ===================== TAB: CHARTS ===================== */}
+        {tab === "charts" && res && (
+          <div>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginBottom: 18 }}>
+              {/* Pie */}
+              <div style={cd}>
+                <h3 style={ch}>{src} {cr} {bt} — COC Breakdown</h3>
+                <ResponsiveContainer width="100%" height={220}>
+                  <PieChart>
+                    <Pie data={pie} dataKey="value" cx="50%" cy="50%" innerRadius={50} outerRadius={90} paddingAngle={2} stroke="none">
+                      {pie.map((e, i) => (<Cell key={i} fill={e.color} />))}
+                    </Pie>
+                    <Tooltip formatter={(val) => fd(val)} contentStyle={{ background: "#ffffff", border: "1px solid #e2e8f0", borderRadius: 0, fontSize: 11 }} />
+                  </PieChart>
+                </ResponsiveContainer>
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 4, marginTop: 4 }}>
+                  {pie.map(c => (
+                    <div key={c.name} style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 11 }}>
+                      <div style={{ width: 8, height: 8, borderRadius: 0, background: c.color, flexShrink: 0 }} />
+                      <span style={{ color: "#64748b" }}>{c.name}</span>
+                      <span style={{ marginLeft: "auto", fontWeight: 600, color: "#1e293b" }}>{fd(c.value)}</span>
+                    </div>
+                  ))}
+                </div>
+                <div style={{ marginTop: 10, padding: "8px 0", borderTop: "1px solid #1e293b", textAlign: "center" }}>
+                  <div style={{ fontSize: 10, color: "#94a3b8" }}>Total COC</div>
+                  <div style={{ fontSize: 24, fontWeight: 700, color: "#3b82f6" }}>{fd(res.total)}<span style={{ fontSize: 12, color: "#94a3b8", fontWeight: 400 }}>/t CO₂</span></div>
+                </div>
+              </div>
+
+              {/* CAPEX category pie */}
+              <div style={cd}>
+                <h3 style={ch}>{src} {cr} {bt} — TIC by System</h3>
+                <ResponsiveContainer width="100%" height={220}>
+                  <PieChart>
+                    <Pie data={res.cxBreak.map(c => ({ name: c.label, value: c.frac, color: CX_COLORS[c.key] || "#475569" }))} dataKey="value" cx="50%" cy="50%" innerRadius={50} outerRadius={90} paddingAngle={2} stroke="none">
+                      {res.cxBreak.map((c, i) => (<Cell key={i} fill={CX_COLORS[c.key] || "#475569"} />))}
+                    </Pie>
+                    <Tooltip formatter={(val) => (val * 100).toFixed(1) + "%"} contentStyle={{ background: "#ffffff", border: "1px solid #e2e8f0", borderRadius: 0, fontSize: 11 }} />
+                  </PieChart>
+                </ResponsiveContainer>
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 4, marginTop: 4 }}>
+                  {res.cxBreak.slice(0, 6).map(c => (
+                    <div key={c.key} style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 11 }}>
+                      <div style={{ width: 8, height: 8, borderRadius: 0, background: CX_COLORS[c.key] || "#475569", flexShrink: 0 }} />
+                      <span style={{ color: "#64748b", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{c.label}</span>
+                      <span style={{ marginLeft: "auto", fontWeight: 600, color: "#1e293b", flexShrink: 0 }}>{(c.frac * 100).toFixed(1)}%</span>
+                    </div>
+                  ))}
+                </div>
+                <div style={{ marginTop: 10, padding: "8px 0", borderTop: "1px solid #1e293b", textAlign: "center" }}>
+                  <div style={{ fontSize: 10, color: "#94a3b8" }}>Total TIC</div>
+                  <div style={{ fontSize: 24, fontWeight: 700, color: "#8b5cf6" }}>{fd(res.sT / 1e6, 1)}<span style={{ fontSize: 12, color: "#94a3b8", fontWeight: 400 }}>M</span></div>
+                </div>
+              </div>
+            </div>
+
+            {/* Bar chart */}
+            <div style={{ ...cd, marginBottom: 18 }}>
+              <h3 style={ch}>All Sources — COC Comparison — {yr} · {LF[st] ? LF[st].n : st} · ${pp}/MWh</h3>
+              <ResponsiveContainer width="100%" height={340}>
+                <BarChart data={bars} margin={{ top: 8, right: 12, bottom: 50, left: 12 }}>
+                  <XAxis dataKey="name" tick={{ fill: "#94a3b8", fontSize: 10 }} angle={-40} textAnchor="end" interval={0} />
+                  <YAxis tick={{ fill: "#64748b", fontSize: 10 }} tickFormatter={(val) => "$" + val} />
+                  <Tooltip contentStyle={{ background: "#ffffff", border: "1px solid #e2e8f0", borderRadius: 0, fontSize: 11 }} formatter={(val) => fd(val)} />
+                  <Legend wrapperStyle={{ fontSize: 11 }} />
+                  <Bar dataKey="Capital" stackId="a" fill="#3b82f6" />
+                  <Bar dataKey="Fixed O&M" stackId="a" fill="#10b981" />
+                  <Bar dataKey="Variable O&M" stackId="a" fill="#f59e0b" />
+                  <Bar dataKey="Power" stackId="a" fill="#ef4444" />
+                  <Bar dataKey="Nat Gas" stackId="a" fill="#a855f7"  />
+                </BarChart>
+              </ResponsiveContainer>
+            </div>
+          </div>
+        )}
+
+        {/* ===================== TAB: SENSITIVITY ===================== */}
+        {tab === "sensitivity" && res && (() => {
+          const v = res.vd;
+          const baseCF = res.cf;
+          const basePP = pp;
+          const baseGP = gp;
+          const baseTIC = v.tic;
+          const baseCCF = v.ccf;
+          const baseCOC = res.total;
+
+          /* local styles — sharp, flat, minimal */
+          const sBox = { background: "#fff", border: "1px solid #e2e8f0", padding: "18px 20px", marginBottom: 14 };
+          const sHdr = { margin: "0 0 14px", fontSize: 11, fontWeight: 700, color: "#64748b", textTransform: "uppercase", letterSpacing: "0.06em" };
+
+          /* helper: recalc COC with one param overridden */
+          const calc = (oPP, oGP, oCF, oTICmult, oCCF) => {
+            const refCO2 = v.rco, refCF = v.cf;
+            const isNGCC = src === "NGCC F-Frame" || src === "NGCC H-Frame";
+            const eqCF = isNGCC ? 1.0 : oCF;
+            const cfRatio = eqCF / refCF;
+            let pCO2 = refCO2 * (oCF / refCF), sRatio = cfRatio;
+            const uC = parseFloat(co2Cap), uP = parseFloat(plCap);
+            if (mode === "co2" && uC > 0) { pCO2 = uC; sRatio = (pCO2 / (oCF / refCF)) / refCO2; }
+            else if (mode === "plant" && uP > 0) { sRatio = uP / v.rpc; pCO2 = refCO2 * sRatio * (oCF / refCF); }
+            const cR2 = (CEPCI[yr] || CEPCI[2026]) / CEPCI[2018];
+            const lR2 = (LF[st] ? LF[st].f : 1) / (LF[v.bs] ? LF[v.bs].f : 0.97);
+            const cS2 = sRatio !== 1 ? Math.pow(sRatio, 0.6) : 1;
+            const rT2 = v.tic * 1e6 * oTICmult, rOwn2 = (v.toc - v.tic) * 1e6 * oTICmult;
+            const sTOC2 = (rT2 + rOwn2) * cS2 * cR2 * lR2;
+            const fS2 = sRatio !== 1 ? Math.pow(1 / sRatio, 0.15) : 1;
+            const sFO2 = v.fo * fS2 * cR2, sVO2 = v.vo * cR2;
+            const sPW2 = v.pw * sRatio;
+            const pPt2 = (sPW2 * oPP * oCF * 8760) / pCO2;
+            const capC2 = (sTOC2 * oCCF) / pCO2;
+            const sFL2 = (v.fl || 0) * (oGP / BASE_GP);
+            return capC2 + sFO2 + sVO2 + pPt2 + sFL2;
+          };
+
+          /* ── Tornado: ±20% on each parameter ── */
+          const pct = 0.20;
+          const tornado = [
+            { name: "Electricity Price", low: calc(basePP*(1-pct), baseGP, baseCF, 1, baseCCF), high: calc(basePP*(1+pct), baseGP, baseCF, 1, baseCCF), baseL: "$"+(basePP*(1-pct)).toFixed(0), baseH: "$"+(basePP*(1+pct)).toFixed(0), baseV: "$"+basePP+"/MWh", color: "#ef4444" },
+            { name: "CAPEX (TIC)", low: calc(basePP, baseGP, baseCF, 1-pct, baseCCF), high: calc(basePP, baseGP, baseCF, 1+pct, baseCCF), baseL: (1-pct).toFixed(2)+"×", baseH: (1+pct).toFixed(2)+"×", baseV: "1.00×", color: "#8b5cf6" },
+            { name: "Capacity Factor", low: calc(basePP, baseGP, Math.min(baseCF*(1+pct),0.99), 1, baseCCF), high: calc(basePP, baseGP, baseCF*(1-pct), 1, baseCCF), baseL: Math.min(Math.round(baseCF*(1+pct)*100),99)+"%", baseH: Math.round(baseCF*(1-pct)*100)+"%", baseV: Math.round(baseCF*100)+"%", color: "#06b6d4" },
+            { name: "CCF", low: calc(basePP, baseGP, baseCF, 1, baseCCF*(1-pct)), high: calc(basePP, baseGP, baseCF, 1, baseCCF*(1+pct)), baseL: (baseCCF*(1-pct)*100).toFixed(2)+"%", baseH: (baseCCF*(1+pct)*100).toFixed(2)+"%", baseV: (baseCCF*100).toFixed(2)+"%", color: "#f59e0b" },
+          ];
+          if (res.hasFuel) {
+            tornado.push({ name: "Natural Gas Price", low: calc(basePP, baseGP*(1-pct), baseCF, 1, baseCCF), high: calc(basePP, baseGP*(1+pct), baseCF, 1, baseCCF), baseL: "$"+(baseGP*(1-pct)).toFixed(2), baseH: "$"+(baseGP*(1+pct)).toFixed(2), baseV: "$"+baseGP+"/MMBtu", color: "#a855f7" });
+          }
+          tornado.forEach(t => { t.spread = t.high - t.low; t.delta = Math.max(Math.abs(t.high - baseCOC), Math.abs(baseCOC - t.low)); });
+          tornado.sort((a, b) => b.spread - a.spread);
+
+          /* ── Sweep data ── */
+          const steps = 20;
+          const mkSweep = (fn) => { const a = []; for (let i = 0; i <= steps; i++) a.push(fn(i / steps)); return a; };
+          const sweepElec = mkSweep(p => ({ x: Math.round((basePP * 0.4 + basePP * 1.2 * p) * 10) / 10, coc: Math.round(calc(basePP * 0.4 + basePP * 1.2 * p, baseGP, baseCF, 1, baseCCF) * 100) / 100 }));
+          const sweepCF = mkSweep(p => { const v2 = 0.50 + 0.49 * p; return { x: Math.round(v2 * 100), coc: Math.round(calc(basePP, baseGP, v2, 1, baseCCF) * 100) / 100 }; });
+          const sweepCAPEX = mkSweep(p => { const m = 0.5 + 1.0 * p; return { x: Math.round(m * 100) / 100, coc: Math.round(calc(basePP, baseGP, baseCF, m, baseCCF) * 100) / 100 }; });
+          const sweepGas = res.hasFuel ? mkSweep(p => { const v2 = baseGP * 0.3 + baseGP * 1.4 * p; return { x: Math.round(v2 * 100) / 100, coc: Math.round(calc(basePP, v2, baseCF, 1, baseCCF) * 100) / 100 }; }) : null;
+
+          const allLow = Math.min(...tornado.map(t => t.low));
+          const allHigh = Math.max(...tornado.map(t => t.high));
+          const pad = (allHigh - allLow) * 0.15;
+          const minCOC = allLow - pad;
+          const maxCOC = allHigh + pad;
+          const range = maxCOC - minCOC;
+
+          const swpLine = { type: "monotone", strokeWidth: 2, dot: false, activeDot: { r: 3, strokeWidth: 0 } };
+          const swpTT = { contentStyle: { background: "#fff", border: "1px solid #e2e8f0", borderRadius: 0, fontSize: 11, boxShadow: "none" }, formatter: (val) => "$" + val.toFixed(2) + "/t" };
+          const swpAxis = { tick: { fill: "#94a3b8", fontSize: 9.5 } };
+
+          return (
+          <div>
+            {/* Header bar */}
+            <div style={{ background: "#fff", border: "1px solid #e2e8f0", padding: "14px 20px", marginBottom: 14, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+              <div>
+                <div style={{ fontSize: 10, color: "#94a3b8", fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.05em" }}>Sensitivity Analysis</div>
+                <div style={{ fontSize: 14, fontWeight: 700, color: "#0f172a", marginTop: 2 }}>{src} — {cr} {bt}</div>
+              </div>
+              <div style={{ textAlign: "right" }}>
+                <div style={{ fontSize: 10, color: "#94a3b8" }}>Base COC</div>
+                <div style={{ fontSize: 22, fontWeight: 800, color: "#3b82f6" }}>{fd(baseCOC)}<span style={{ fontSize: 11, color: "#94a3b8", fontWeight: 400 }}>/t CO₂</span></div>
+              </div>
+            </div>
+
+            {/* Tornado */}
+            <div style={sBox}>
+              <h3 style={sHdr}>Tornado — ±20% Parameter Variation</h3>
+              {tornado.map((t, i) => {
+                const leftPct = ((t.low - minCOC) / range) * 100;
+                const basePctPos = ((baseCOC - minCOC) / range) * 100;
+                const widthPct = ((t.high - t.low) / range) * 100;
+                return (
+                  <div key={i} style={{ display: "grid", gridTemplateColumns: "130px 1fr 60px", alignItems: "center", marginBottom: 10, gap: 10 }}>
+                    <div style={{ fontSize: 12, color: "#334155", fontWeight: 600, textAlign: "right" }}>{t.name}</div>
+                    <div style={{ position: "relative", height: 24, background: "#f8fafc" }}>
+                      <div style={{ position: "absolute", left: basePctPos + "%", top: 0, bottom: 0, width: 1, background: "#0f172a", zIndex: 3 }} />
+                      <div style={{ position: "absolute", left: leftPct + "%", width: widthPct + "%", top: 3, bottom: 3, background: t.color, opacity: 0.7 }} />
+                      <div style={{ position: "absolute", left: leftPct + "%", top: "50%", transform: "translate(-100%, -50%)", fontSize: 9, color: "#475569", fontWeight: 600, paddingRight: 4, whiteSpace: "nowrap" }}>{fd(t.low)}</div>
+                      <div style={{ position: "absolute", left: (leftPct + widthPct) + "%", top: "50%", transform: "translateY(-50%)", fontSize: 9, color: "#475569", fontWeight: 600, paddingLeft: 4, whiteSpace: "nowrap" }}>{fd(t.high)}</div>
+                    </div>
+                    <div style={{ fontSize: 11, color: "#0f172a", fontWeight: 700, textAlign: "right", fontVariantNumeric: "tabular-nums" }}>±{fd(t.spread / 2)}</div>
+                  </div>
+                );
+              })}
+              <div style={{ display: "grid", gridTemplateColumns: "130px 1fr 60px", marginTop: 4, gap: 10 }}>
+                <div />
+                <div style={{ fontSize: 9, color: "#94a3b8", display: "flex", justifyContent: "space-between", padding: "0 1px" }}>
+                  <span>{fd(minCOC)}</span>
+                  <span style={{ color: "#0f172a", fontWeight: 700, fontSize: 10 }}>Base {fd(baseCOC)}</span>
+                  <span>{fd(maxCOC)}</span>
+                </div>
+                <div />
+              </div>
+            </div>
+
+            {/* Sweep charts — 2×2 grid */}
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14, marginBottom: 14 }}>
+              {[
+                { title: "Electricity Price", data: sweepElec, color: "#ef4444", xLabel: "$/MWh", refX: Math.round(basePP * 10) / 10, labelFmt: v => "$" + v + "/MWh" },
+                { title: "Capacity Factor", data: sweepCF, color: "#06b6d4", xLabel: "CF %", refX: Math.round(baseCF * 100), labelFmt: v => v + "%" },
+                { title: "CAPEX Multiplier", data: sweepCAPEX, color: "#8b5cf6", xLabel: "TIC ×", refX: 1, labelFmt: v => v + "×" },
+                ...(res.hasFuel && sweepGas ? [{ title: "Natural Gas Price", data: sweepGas, color: "#a855f7", xLabel: "$/MMBtu", refX: Math.round(baseGP * 100) / 100, labelFmt: v => "$" + v }] : [])
+              ].map((sw, idx) => (
+                <div key={idx} style={sBox}>
+                  <h3 style={sHdr}>{sw.title}</h3>
+                  <ResponsiveContainer width="100%" height={180}>
+                    <LineChart data={sw.data} margin={{ top: 4, right: 12, bottom: 14, left: 8 }}>
+                      <XAxis dataKey="x" {...swpAxis} label={{ value: sw.xLabel, position: "bottom", offset: 0, style: { fontSize: 9, fill: "#94a3b8" } }} />
+                      <YAxis {...swpAxis} tickFormatter={v => "$" + v} domain={["auto", "auto"]} width={45} />
+                      <Tooltip {...swpTT} labelFormatter={sw.labelFmt} />
+                      <ReferenceLine x={sw.refX} stroke="#cbd5e1" strokeDasharray="3 3" strokeWidth={1} />
+                      <ReferenceLine y={Math.round(baseCOC * 100) / 100} stroke="#cbd5e1" strokeDasharray="3 3" strokeWidth={1} />
+                      <Line dataKey="coc" stroke={sw.color} {...swpLine} />
+                    </LineChart>
+                  </ResponsiveContainer>
+                </div>
+              ))}
+            </div>
+
+            {/* Impact table */}
+            <div style={sBox}>
+              <h3 style={sHdr}>Parameter Impact Summary</h3>
+              <table style={{ width: "100%", borderCollapse: "collapse" }}>
+                <thead>
+                  <tr style={{ borderBottom: "2px solid #e2e8f0" }}>
+                    <th style={{ padding: "6px 10px", fontSize: 10, fontWeight: 700, color: "#64748b", textTransform: "uppercase", textAlign: "left" }}>Parameter</th>
+                    <th style={{ padding: "6px 10px", fontSize: 10, fontWeight: 700, color: "#64748b", textTransform: "uppercase", textAlign: "center" }}>Base</th>
+                    <th style={{ padding: "6px 10px", fontSize: 10, fontWeight: 700, color: "#3b82f6", textTransform: "uppercase", textAlign: "right" }}>−20%</th>
+                    <th style={{ padding: "6px 10px", fontSize: 10, fontWeight: 700, color: "#64748b", textTransform: "uppercase", textAlign: "right" }}>COC Low</th>
+                    <th style={{ padding: "6px 10px", fontSize: 10, fontWeight: 700, color: "#ef4444", textTransform: "uppercase", textAlign: "right" }}>+20%</th>
+                    <th style={{ padding: "6px 10px", fontSize: 10, fontWeight: 700, color: "#64748b", textTransform: "uppercase", textAlign: "right" }}>COC High</th>
+                    <th style={{ padding: "6px 10px", fontSize: 10, fontWeight: 700, color: "#0f172a", textTransform: "uppercase", textAlign: "right" }}>Spread</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {tornado.map((t, i) => (
+                    <tr key={i} style={{ borderBottom: "1px solid #f1f5f9" }}>
+                      <td style={{ padding: "8px 10px", fontSize: 12, fontWeight: 600, color: "#334155" }}>
+                        <span style={{ display: "inline-block", width: 8, height: 8, background: t.color, marginRight: 8, verticalAlign: "middle" }} />{t.name}
+                      </td>
+                      <td style={{ padding: "8px 10px", fontSize: 11, color: "#64748b", textAlign: "center" }}>{t.baseV}</td>
+                      <td style={{ padding: "8px 10px", fontSize: 11, color: "#3b82f6", textAlign: "right", fontWeight: 500 }}>{t.baseL}</td>
+                      <td style={{ padding: "8px 10px", fontSize: 12, color: "#1e293b", textAlign: "right", fontWeight: 600, fontVariantNumeric: "tabular-nums" }}>{fd(t.low)}/t</td>
+                      <td style={{ padding: "8px 10px", fontSize: 11, color: "#ef4444", textAlign: "right", fontWeight: 500 }}>{t.baseH}</td>
+                      <td style={{ padding: "8px 10px", fontSize: 12, color: "#1e293b", textAlign: "right", fontWeight: 600, fontVariantNumeric: "tabular-nums" }}>{fd(t.high)}/t</td>
+                      <td style={{ padding: "8px 10px", fontSize: 12, color: "#0f172a", textAlign: "right", fontWeight: 800, fontVariantNumeric: "tabular-nums" }}>{fd(t.spread)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>);
+        })()}
+
+        {/* ===================== TAB: ASSUMPTIONS ===================== */}
+        {tab === "assumptions" && (() => {
+          const aBox = { background: "#fff", border: "1px solid #e2e8f0", padding: "18px 20px", marginBottom: 14 };
+          const aHdr = { margin: "0 0 14px", fontSize: 11, fontWeight: 700, color: "#64748b", textTransform: "uppercase", letterSpacing: "0.06em" };
+          const aTh = { padding: "6px 10px", fontSize: 10, fontWeight: 700, color: "#64748b", textTransform: "uppercase", textAlign: "left", borderBottom: "2px solid #e2e8f0" };
+          const aTd = { padding: "6px 10px", fontSize: 11.5, color: "#1e293b", borderBottom: "1px solid #f1f5f9" };
+          const aTdR = { ...aTd, textAlign: "right", fontVariantNumeric: "tabular-nums", fontWeight: 600 };
+          const aTdG = { ...aTd, color: "#64748b", fontSize: 11 };
+          const noteStyle = { fontSize: 11, color: "#94a3b8", lineHeight: 1.6, marginTop: 10 };
+
+          return (
+          <div>
+            {/* Methodology */}
+            <div style={aBox}>
+              <h3 style={aHdr}>Methodology & Data Sources</h3>
+              <div style={{ display: "grid", gridTemplateColumns: "120px 1fr", gap: "8px 16px", fontSize: 12, color: "#334155", lineHeight: 1.6 }}>
+                <div style={{ fontWeight: 700, color: "#64748b" }}>Basis</div>
+                <div>NETL Carbon Capture Retrofit Database — 18 industrial and power sector point-source scenarios with bottom-up engineering cost estimates</div>
+                <div style={{ fontWeight: 700, color: "#64748b" }}>Cost Year</div>
+                <div>All NETL reference costs are in 2018 US dollars, escalated to the user-selected cost year via CEPCI</div>
+                <div style={{ fontWeight: 700, color: "#64748b" }}>Capture Tech</div>
+                <div>Amine-based post-combustion capture (MEA / advanced solvent) with compression to pipeline-ready supercritical CO₂ (~2,215 psia)</div>
+                <div style={{ fontWeight: 700, color: "#64748b" }}>System Bound.</div>
+                <div>Capture plant battery limits — excludes CO₂ transport, storage, monitoring, and any host-plant modifications outside the capture island</div>
+                <div style={{ fontWeight: 700, color: "#64748b" }}>COC Metric</div>
+                <div>First-year levelized cost of CO₂ captured ($/t CO₂) — annualized CAPEX via capital charge factor + annual OPEX + energy, divided by annual CO₂ captured</div>
+                <div style={{ fontWeight: 700, color: "#64748b" }}>Scaling</div>
+                <div>Six-tenths power law (exponent 0.6) applied to CAPEX when plant capacity differs from NETL reference size. OPEX fixed costs scaled with exponent −0.15 for economies of scale</div>
+              </div>
+            </div>
+
+            {/* Key Assumptions */}
+            <div style={aBox}>
+              <h3 style={aHdr}>Key Assumptions & Defaults</h3>
+              <table style={{ width: "100%", borderCollapse: "collapse" }}>
+                <thead><tr>
+                  <th style={aTh}>Parameter</th>
+                  <th style={{ ...aTh, textAlign: "right" }}>Default</th>
+                  <th style={aTh}>Description</th>
+                </tr></thead>
+                <tbody>
+                  {[
+                    ["Capacity Factor", "85%", "Fraction of calendar hours the plant operates annually (8,760 hrs × CF). Applies to CO₂ output and power consumption."],
+                    ["Cost Year Basis", "2018 USD", "NETL reference cost vintage. All CAPEX/OPEX escalated from 2018 via CEPCI ratio."],
+                    ["CEPCI Base", "603.1 (2018)", "Chemical Engineering Plant Cost Index for the reference year. Target year index divided by 603.1 gives the inflation multiplier."],
+                    ["Location Base", "Louisiana (0.97)", "NETL reference plant location. User location factor divided by 0.97 gives the regional adjustment."],
+                    ["Capital Charge Factor", "Varies by source", "Annualization factor that converts total overnight cost to an annual capital charge. Includes cost of capital, depreciation, taxes, and insurance. Ranges from 4.55% (Refinery H₂) to 7.73% (NGCC)."],
+                    ["Nat Gas Base Price", "$" + BASE_GP + "/MMBtu", "NETL reference natural gas price (2018 basis). Fuel cost $/t CO₂ scales linearly with the ratio of user gas price to this base."],
+                    ["Electricity Pricing", "EIA state-average", "Industrial electricity rates from EIA (¢/kWh), converted to $/MWh. User may override with a manual price."],
+                    ["NGCC Equipment Sizing", "100% CF", "For NGCC gas turbine scenarios, capture equipment is sized at full load (100% CF) to handle peak flue gas. Annual CO₂ output still uses the operating CF."],
+                    ["Scaling Exponent (CAPEX)", "0.60", "Economies of scale exponent for total installed cost. CAPEX_scaled = CAPEX_ref × (capacity_ratio)^0.6"],
+                    ["Scaling Exponent (Fixed O&M)", "−0.15", "Fixed O&M economy of scale. Per-ton fixed costs decrease as 1/ratio^0.15 for larger plants."],
+                    ["Owner's Costs", "TOC − TIC", "Includes preproduction, inventory capital, financing, and other owner costs. Scaled proportionally with TIC."],
+                    ["CO₂ Purity", "99% or 90%", "CO₂ product purity. Higher purity increases capital and energy costs. Available options depend on the source type."],
+                  ].map((r, i) => (
+                    <tr key={i}><td style={aTd}>{r[0]}</td><td style={aTdR}>{r[1]}</td><td style={aTdG}>{r[2]}</td></tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+
+            {/* CEPCI Index */}
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14, marginBottom: 14 }}>
+              <div style={aBox}>
+                <h3 style={aHdr}>CEPCI Index Values</h3>
+                <table style={{ width: "100%", borderCollapse: "collapse" }}>
+                  <thead><tr><th style={aTh}>Year</th><th style={{ ...aTh, textAlign: "right" }}>Index</th><th style={{ ...aTh, textAlign: "right" }}>vs 2018</th></tr></thead>
+                  <tbody>
+                    {Object.entries(CEPCI).map(([y, v]) => (
+                      <tr key={y}><td style={aTd}>{y}</td><td style={aTdR}>{v.toFixed(1)}</td><td style={aTdR}>{(v / CEPCI[2018]).toFixed(3)}×</td></tr>
+                    ))}
+                  </tbody>
+                </table>
+                <div style={noteStyle}>Source: Chemical Engineering Magazine. 2025–2026 values are estimates.</div>
+              </div>
+
+              {/* Capital Charge Factors by source */}
+              <div style={aBox}>
+                <h3 style={aHdr}>Capital Charge Factors by Source</h3>
+                <table style={{ width: "100%", borderCollapse: "collapse" }}>
+                  <thead><tr><th style={aTh}>Source</th><th style={{ ...aTh, textAlign: "right" }}>CCF</th><th style={aTh}>Category</th></tr></thead>
+                  <tbody>
+                    {Object.entries(SC).map(([name, s]) => {
+                      const d = s.vr ? Object.values(s.vr)[0] : s;
+                      return (<tr key={name}><td style={aTd}>{name}</td><td style={aTdR}>{(d.ccf * 100).toFixed(2)}%</td><td style={aTdG}>{s.cat}</td></tr>);
+                    })}
+                  </tbody>
+                </table>
+                <div style={noteStyle}>CCF includes cost of equity, debt, depreciation, taxes, and insurance per NETL methodology.</div>
+              </div>
+            </div>
+
+            {/* Scenario Reference Data */}
+            <div style={aBox}>
+              <h3 style={aHdr}>NETL Reference Scenario Data (2018 USD)</h3>
+              <div style={{ overflowX: "auto" }}>
+                <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 900 }}>
+                  <thead><tr>
+                    {["Source","Category","Ref Size","CO₂ (t/yr)","TIC ($M)","TOC ($M)","Fixed O&M ($/t)","Var O&M ($/t)","Power (MW)","Fuel ($/t)","Base State"].map(h => (
+                      <th key={h} style={{ ...aTh, whiteSpace: "nowrap", padding: "6px 8px" }}>{h}</th>
+                    ))}
+                  </tr></thead>
+                  <tbody>
+                    {Object.entries(SC).map(([name, s]) => {
+                      const d = s.vr ? Object.values(s.vr)[0] : s;
+                      return (
+                        <tr key={name} style={{ borderBottom: "1px solid #f1f5f9" }}>
+                          <td style={{ ...aTd, fontWeight: 600, padding: "6px 8px" }}>{name}</td>
+                          <td style={{ ...aTdG, padding: "6px 8px" }}>{s.cat}</td>
+                          <td style={{ ...aTd, padding: "6px 8px", fontSize: 11 }}>{s.rps}</td>
+                          <td style={{ ...aTdR, padding: "6px 8px" }}>{fm(d.rco || s.rco, 0)}</td>
+                          <td style={{ ...aTdR, padding: "6px 8px" }}>{(d.tic || s.tic).toFixed(1)}</td>
+                          <td style={{ ...aTdR, padding: "6px 8px" }}>{(d.toc || s.toc).toFixed(1)}</td>
+                          <td style={{ ...aTdR, padding: "6px 8px" }}>{(d.fo || s.fo).toFixed(2)}</td>
+                          <td style={{ ...aTdR, padding: "6px 8px" }}>{(d.vo || s.vo).toFixed(2)}</td>
+                          <td style={{ ...aTdR, padding: "6px 8px" }}>{(d.pw || s.pw).toFixed(1)}</td>
+                          <td style={{ ...aTdR, padding: "6px 8px" }}>{(d.fl || s.fl || 0).toFixed(2)}</td>
+                          <td style={{ ...aTdG, padding: "6px 8px" }}>{LF[s.bs] ? LF[s.bs].n : s.bs}</td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+              <div style={noteStyle}>All costs in 2018 USD. TIC = Total Installed Cost. TOC = Total Overnight Cost (TIC + Owner's Costs). O&M figures are per tonne CO₂ captured. Power is parasitic load in MW at reference capacity.</div>
+            </div>
+
+            {/* Location Factors */}
+            <div style={aBox}>
+              <h3 style={aHdr}>State Location Factors</h3>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: "0" }}>
+                {Object.entries(LF).sort((a,b) => a[1].n.localeCompare(b[1].n)).map(([code, s]) => (
+                  <div key={code} style={{ display: "flex", justifyContent: "space-between", padding: "4px 10px", borderBottom: "1px solid #f8fafc", fontSize: 11 }}>
+                    <span style={{ color: "#64748b" }}>{s.n}</span>
+                    <span style={{ fontWeight: 600, color: s.f > 1.15 ? "#ef4444" : s.f < 0.97 ? "#10b981" : "#1e293b", fontVariantNumeric: "tabular-nums" }}>{s.f.toFixed(2)}</span>
+                  </div>
+                ))}
+              </div>
+              <div style={noteStyle}>Factors relative to national average (1.00). Red = high cost, green = below average. Source: NETL regional construction cost indices.</div>
+            </div>
+
+            {/* EIA Electricity Rates */}
+            <div style={aBox}>
+              <h3 style={aHdr}>EIA Industrial Electricity Rates (¢/kWh → $/MWh)</h3>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: "0" }}>
+                {Object.entries(EIA).sort((a,b) => (LF[a[0]]?.n||a[0]).localeCompare(LF[b[0]]?.n||b[0])).map(([code, rate]) => (
+                  <div key={code} style={{ display: "flex", justifyContent: "space-between", padding: "4px 10px", borderBottom: "1px solid #f8fafc", fontSize: 11 }}>
+                    <span style={{ color: "#64748b" }}>{LF[code] ? LF[code].n : code}</span>
+                    <span style={{ fontWeight: 600, color: "#1e293b", fontVariantNumeric: "tabular-nums" }}>${(rate * 10).toFixed(0)}/MWh</span>
+                  </div>
+                ))}
+              </div>
+              <div style={noteStyle}>Source: EIA Electric Power Monthly, average industrial rate. Converted from ¢/kWh to $/MWh (×10).</div>
+            </div>
+
+            {/* Formulas */}
+            <div style={aBox}>
+              <h3 style={aHdr}>Key Formulas</h3>
+              <div style={{ display: "grid", gap: 12 }}>
+                {[
+                  { name: "CEPCI Ratio", formula: "CEPCI_target_year / CEPCI_2018", note: "Escalates all capital and fixed O&M costs from 2018 base" },
+                  { name: "Location Ratio", formula: "LF_user_state / LF_base_state", note: "Adjusts capital costs for regional construction cost differences" },
+                  { name: "Capacity Scale Factor", formula: "(Capacity_ratio) ^ 0.6", note: "Six-tenths rule for CAPEX. Capacity_ratio = user_size / ref_size" },
+                  { name: "Scaled TIC", formula: "TIC_ref × Scale_factor × CEPCI_ratio × Location_ratio", note: "Total installed cost adjusted for size, inflation, and location" },
+                  { name: "Scaled TOC", formula: "(TIC_ref + Owner's_Costs_ref) × Scale × CEPCI × Location", note: "Total overnight cost including owner's costs" },
+                  { name: "Capital Charge ($/t)", formula: "TOC_scaled × CCF / Annual_CO₂", note: "Annualized capital cost per tonne captured" },
+                  { name: "Fixed O&M ($/t)", formula: "FOM_ref × (1/ratio)^0.15 × CEPCI_ratio", note: "Economies of scale reduce per-unit fixed costs for larger plants" },
+                  { name: "Variable O&M ($/t)", formula: "VOM_ref × CEPCI_ratio", note: "No scale adjustment — variable costs are proportional to throughput" },
+                  { name: "Power Cost ($/t)", formula: "Power_MW × $/MWh × CF × 8760 / Annual_CO₂", note: "Parasitic power consumption times electricity price, annualized" },
+                  { name: "Fuel Cost ($/t)", formula: "Fuel_ref × (Gas_price / $4.42)", note: "Scales linearly with natural gas price relative to 2018 NETL base" },
+                  { name: "Project CO₂ (t/yr)", formula: "Ref_CO₂ × (CF / Ref_CF)", note: "Annual capture volume, adjusted for capacity factor. Custom sizing may also apply scale ratio" },
+                  { name: "Total COC ($/t)", formula: "Capital + Fixed O&M + Variable O&M + Power + Fuel", note: "Sum of all cost components per tonne CO₂ captured" },
+                ].map((f, i) => (
+                  <div key={i} style={{ display: "grid", gridTemplateColumns: "160px 1fr", gap: 10, padding: "6px 0", borderBottom: i < 11 ? "1px solid #f1f5f9" : "none" }}>
+                    <div style={{ fontSize: 12, fontWeight: 700, color: "#334155" }}>{f.name}</div>
+                    <div>
+                      <div style={{ fontFamily: "Courier New, monospace", fontSize: 11.5, color: "#475569", background: "#f8fafc", padding: "4px 8px", border: "1px solid #f1f5f9", marginBottom: 3 }}>{f.formula}</div>
+                      <div style={{ fontSize: 10.5, color: "#94a3b8" }}>{f.note}</div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            {/* Limitations */}
+            <div style={aBox}>
+              <h3 style={aHdr}>Limitations & Caveats</h3>
+              <div style={{ fontSize: 12, color: "#475569", lineHeight: 1.7 }}>
+                {[
+                  "NETL reference costs represent Class 4–5 estimates (±30–50% accuracy) for conceptual/pre-feasibility evaluation only.",
+                  "Six-tenths scaling rule is an approximation; accuracy degrades beyond ±50% of reference plant size.",
+                  "O&M costs do not include CO₂ transport, injection, storage, or long-term monitoring.",
+                  "No revenue offsets (e.g., 45Q tax credits, EOR income, carbon credit sales) are included in the COC.",
+                  "Electricity and natural gas prices are treated as flat (no time-of-use, demand charges, or escalation over project life).",
+                  "CEPCI values for 2025–2026 are estimated projections and may differ from actuals.",
+                  "Capital charge factors embed specific financing assumptions (debt/equity split, cost of capital, tax rates) that may not match project-specific terms.",
+                  "NGCC scenarios assume the base plant already exists — capture costs represent the incremental retrofit, not the full power plant.",
+                  "Location factors are state-level averages and do not account for site-specific conditions (soil, seismic, permitting, labor availability).",
+                  "No learning curve or technology maturation effects are modeled — costs reflect current commercial technology."
+                ].map((c, i) => (
+                  <div key={i} style={{ display: "flex", gap: 10, marginBottom: 6 }}>
+                    <span style={{ color: "#94a3b8", flexShrink: 0, fontSize: 11, marginTop: 1 }}>{(i + 1).toString().padStart(2, "0")}</span>
+                    <span>{c}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>);
+        })()}
+
+        {/* No results message for Model/Charts tabs */}
+        {tab !== "io" && tab !== "assumptions" && !res && (
+          <div style={{ textAlign: "center", padding: "60px 20px", color: "#64748b" }}>
+            <div style={{ fontSize: 14 }}>Switch to <strong>Inputs & Outputs</strong> to configure a scenario first.</div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+
+ReactDOM.createRoot(document.getElementById('root')).render(<CCUSModel />);
+</script>
+</body>
+</html>
