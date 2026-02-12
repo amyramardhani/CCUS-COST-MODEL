@@ -52,7 +52,7 @@ const G = {
   "EIA Rate": "U.S. Energy Information Administration (EIA) average industrial electricity price by state, from Table 5.6.a (2024 data). Converted from ¢/kWh to $/MWh.",
   "Emission Source": "The industrial process or power plant whose flue gas CO₂ is being captured. CO₂ concentration varies widely: ~4% for NGCC, ~14\u201325% for cement/steel, up to 99%+ for ammonia/ethanol.",
   "Cost Year": "The dollar-year for all cost outputs. CEPCI index is used to escalate from the 2018 NETL base year to the selected year.",
-  "Capture Config": "Capture rate (90% or 99%) and build type (Retrofit or Greenfield). Higher capture rates require larger equipment and more energy, increasing costs.",
+  "Capture Config": "Capture rate (1–100%) and build type (Retrofit or Greenfield). Higher capture rates require larger equipment and more energy, increasing costs. Values outside the NETL reference data (typically 90% or 99%) are interpolated estimates.",
   "Project CO₂": "Annual tonnes of CO₂ captured at the specified capacity factor. This is the denominator in all $/t CO₂ calculations.",
   "Power Demand": "Electrical power consumed by the capture system (MW). Includes CO₂ compressors, solvent circulation pumps, cooling water pumps, and fans. Scales linearly with CO₂ throughput.",
   "Annual Power Cost": "Total electricity expenditure per year = MW × $/MWh × CF × 8,760 hours. A major operating cost driver, especially for large industrial/power plant capture.",
@@ -159,11 +159,41 @@ const CX_COLORS = {fg:"#3b82f6",fw:"#06b6d4",ds:"#8b5cf6",cw:"#10b981",el:"#f59e
 function gv(src, cr, bt) {
   const s = SC[src];
   if (!s) return null;
+  const crNum = parseFloat(cr);
+  let d, estCR = false;
+  const hasCR = s.cr.includes(cr);
   if (s.vr) {
-    const d = s.vr[`${cr}|${bt}`] || s.vr[cr] || Object.values(s.vr)[0];
-    return { ...s, ...d };
+    d = s.vr[`${cr}|${bt}`] || s.vr[cr];
+    if (!d) {
+      const keys = Object.keys(s.vr);
+      const crMatch = keys.find(k => k.startsWith(cr));
+      const btMatch = keys.find(k => k.endsWith(bt));
+      d = s.vr[crMatch] || s.vr[btMatch] || Object.values(s.vr)[0];
+    }
+  } else {
+    d = s;
   }
-  return s;
+  const base = { ...s, ...d };
+  let crAdj = 1;
+  const baseCR = d && s.vr ? (Object.keys(s.vr).find(k => s.vr[k] === d) || "").split("|")[0] || s.cr[0] : s.cr[0];
+  const baseCRNum = parseFloat(baseCR);
+  if (!hasCR && !isNaN(crNum) && !isNaN(baseCRNum)) {
+    estCR = true;
+    const crDiff = crNum - baseCRNum;
+    crAdj = 1 + (crDiff / 9) * 0.10;
+  }
+  const pwAdj = estCR ? (1 + (crNum - baseCRNum) / 9 * 0.08) : 1;
+  const rcoAdj = estCR ? (crNum / baseCRNum) : 1;
+  return {
+    ...base,
+    tic: base.tic * crAdj,
+    toc: base.toc * crAdj,
+    fo: base.fo * crAdj,
+    vo: base.vo * crAdj,
+    pw: base.pw * pwAdj,
+    rco: base.rco * rcoAdj,
+    estCR
+  };
 }
 
 function fm(n, d) { if (n == null || isNaN(n)) return "—"; return n.toLocaleString("en-US", { minimumFractionDigits: d !== undefined ? d : 2, maximumFractionDigits: d !== undefined ? d : 2 }); }
@@ -171,7 +201,7 @@ function fd(n, d) { if (n == null || isNaN(n)) return "—"; return "$" + fm(n, 
 
 function CCUSModel() {
   const [src, setSrc] = useState("Ammonia");
-  const [cr, setCr] = useState("99%");
+  const [crCustom, setCrCustom] = useState(99);
   const [bt, setBt] = useState("Retrofit");
   const [st, setSt] = useState("TX");
   const [yr, setYr] = useState(2025);
@@ -186,6 +216,7 @@ function CCUSModel() {
   const [meth, setMeth] = useState(false);
   const [tab, setTab] = useState("io");
 
+  const cr = `${crCustom}%`;
   const sd = SC[src];
   const aR = sd ? sd.cr : ["99%"];
   const aB = sd ? sd.bt : ["Retrofit"];
@@ -198,7 +229,7 @@ function CCUSModel() {
     setSrc(ns);
     const s = SC[ns];
     if (s) {
-      if (!s.cr.includes(cr)) setCr(s.cr[0]);
+      if (!s.cr.includes(cr)) setCrCustom(parseFloat(s.cr[0]));
       if (!s.bt.includes(bt)) setBt(s.bt[0]);
     }
   }, [cr, bt]);
@@ -244,7 +275,7 @@ function CCUSModel() {
       sFL, bfl, hasFuel: bfl > 0, cxBreak, cf, cfCustom, isNGCC, eqCF,
       total: capC + sFO + sVO + pPt + sFL, ccf: vd.ccf
     };
-  }, [src, cr, bt, st, yr, mode, co2Cap, plCap, pp, gp, cfIn]);
+  }, [src, crCustom, bt, st, yr, mode, co2Cap, plCap, pp, gp, cfIn]);
 
   const pie = res ? [
     { name: "Capital", value: res.capC, color: "#3b82f6" },
@@ -342,9 +373,11 @@ function CCUSModel() {
                 </div>
                 <div style={row}>
                   <span style={rowL}><Tip k="Capture Config">Capture Rate</Tip></span>
-                  <select value={cr} onChange={(e) => setCr(e.target.value)} style={{...fi, width: 80, textAlign: "left", cursor: "pointer"}} disabled={aR.length <= 1}>
-                    {aR.map(r => <option key={r} value={r}>{r}</option>)}
-                  </select>
+                  <div style={{...rowR, gap: 4}}>
+                    <input type="number" value={crCustom} onChange={(e) => setCrCustom(Math.min(100, Math.max(1, parseFloat(e.target.value) || 1)))} min="1" max="100" step="1" style={{...fi, width: 55, fontSize: 12, padding: "5px 8px", textAlign: "right"}} />
+                    <span style={{fontSize: 11, color: "#64748b"}}>%</span>
+                    {!aR.includes(cr) && <span style={{fontSize: 10, color: "#f59e0b", fontWeight: 600}}>⚠ est</span>}
+                  </div>
                 </div>
                 <div style={{...row, borderBottom: "none"}}>
                   <span style={rowL}><Tip k="Retrofit">Build Type</Tip></span>
